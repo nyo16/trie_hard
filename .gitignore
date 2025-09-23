@@ -26,3 +26,6 @@ trie_again-*.tar
 /target/
 native/**/target/
 priv/
+
+# The checksum files for precompiled NIFs
+checksum-*.exs
