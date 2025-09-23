@@ -1,4 +1,4 @@
-use rustler::{Atom, Env, ResourceArc, Term, Encoder, Binary, NewBinary};
+use rustler::{Atom, Binary, Encoder, Env, NewBinary, ResourceArc, Term};
 use std::sync::Mutex;
 
 mod trie;
@@ -18,7 +18,6 @@ enum HybridValue {
     String(String),  // Zero-overhead for strings
     Binary(Vec<u8>), // Binary-encoded for other terms
 }
-
 
 pub struct TrieResource {
     trie: Mutex<Trie<HybridValue>>,
