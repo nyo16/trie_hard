@@ -116,6 +116,7 @@ fn auto_complete(
 }
 
 #[rustler::nif]
+#[allow(unused_variables)]
 fn add_word_list(env: Env, trie_resource: ResourceArc<TrieResource>, words: Vec<String>) -> Atom {
     match trie_resource.trie.lock() {
         Ok(mut trie) => {
