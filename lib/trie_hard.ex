@@ -8,21 +8,21 @@ defmodule TrieHard do
   - **Fast operations**: Sub-microsecond autocomplete performance
   - **Memory efficient**: Shared prefix storage
   - **Unicode support**: Full UTF-8 character support
-  - **Generic values**: Store any term as values
+  - **Generic values**: Store any Erlang term as values
   - **Batch operations**: Efficient bulk insertions
   - **Thread-safe**: Concurrent access support
 
   ## Example
 
       iex> trie = TrieHard.new()
-      iex> TrieHard.insert(trie, "cat", "feline")
+      iex> TrieHard.insert(trie, "cat", :feline)
       :ok
-      iex> TrieHard.insert(trie, "car", "vehicle")
+      iex> TrieHard.insert(trie, "car", %{type: "vehicle", wheels: 4})
       :ok
-      iex> TrieHard.insert(trie, "card", "payment")
+      iex> TrieHard.insert(trie, "card", {"payment", "plastic"})
       :ok
       iex> TrieHard.get(trie, "cat")
-      {:ok, "feline"}
+      {:ok, :feline}
       iex> {:ok, results} = TrieHard.auto_complete(trie, "ca", 10)
       iex> Enum.sort(results)
       ["car", "card", "cat"]
@@ -32,7 +32,7 @@ defmodule TrieHard do
 
   @type trie :: reference()
   @type key :: String.t()
-  @type value :: String.t()
+  @type value :: term()
 
   @doc """
   Creates a new empty Trie.
@@ -54,16 +54,20 @@ defmodule TrieHard do
   ## Parameters
   - `trie` - The trie reference
   - `key` - The key to insert (string)
-  - `value` - The value to associate with the key (string)
+  - `value` - The value to associate with the key (any Erlang term)
 
   ## Examples
 
       iex> trie = TrieHard.new()
       iex> TrieHard.insert(trie, "hello", "world")
       :ok
+      iex> TrieHard.insert(trie, "config", %{timeout: 5000, retry: true})
+      :ok
+      iex> TrieHard.insert(trie, "data", {:ok, [1, 2, 3]})
+      :ok
   """
   @spec insert(trie(), key(), value()) :: :ok | :error
-  def insert(trie, key, value) when is_binary(key) and is_binary(value) do
+  def insert(trie, key, value) when is_binary(key) do
     Native.insert(trie, key, value)
   end
 
@@ -86,12 +90,30 @@ defmodule TrieHard do
       :ok
       iex> TrieHard.get(trie, "hello")
       {:ok, "world"}
+      iex> TrieHard.insert(trie, "data", {:ok, %{id: 123}})
+      :ok
+      iex> TrieHard.get(trie, "data")
+      {:ok, {:ok, %{id: 123}}}
       iex> TrieHard.get(trie, "missing")
       {:not_found, nil}
   """
   @spec get(trie(), key()) :: {:ok, value()} | {:not_found, nil} | {:error, nil}
   def get(trie, key) when is_binary(key) do
-    Native.get(trie, key)
+    case Native.get(trie, key) do
+      {:ok, value} when is_binary(value) ->
+        # Try to decode if it's an Erlang external term format
+        try do
+          decoded = :erlang.binary_to_term(value)
+          {:ok, decoded}
+        rescue
+          ArgumentError ->
+            # If decoding fails, it's just a binary value
+            {:ok, value}
+        end
+
+      other ->
+        other
+    end
   end
 
   @doc """

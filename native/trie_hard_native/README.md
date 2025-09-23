@@ -1,4 +1,4 @@
-# NIF for TrieAgain.Native
+# NIF for TrieHard.Native
 
 ## To build the NIF module:
 
@@ -7,7 +7,7 @@
 ## To load the NIF:
 
 ```elixir
-defmodule TrieAgain.Native do
+defmodule TrieHard.Native do
   use Rustler, otp_app: :trie_again, crate: "trie_again_native"
 
   # When your NIF is loaded, it will override this function.

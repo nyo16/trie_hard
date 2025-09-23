@@ -161,9 +161,6 @@ mix test
 
 # Run with benchmarks
 mix test --include benchmark
-
-# Run example
-elixir -r lib/trie_hard.ex -r lib/trie_hard/native.ex examples/usage_example.exs
 ```
 
 ## Architecture

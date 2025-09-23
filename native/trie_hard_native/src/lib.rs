@@ -1,4 +1,4 @@
-use rustler::{Atom, Env, ResourceArc, Term};
+use rustler::{Atom, Binary, Encoder, Env, NewBinary, ResourceArc, Term};
 use std::sync::Mutex;
 
 mod trie;
@@ -13,8 +13,14 @@ mod atoms {
     }
 }
 
+#[derive(Debug, Clone)]
+enum HybridValue {
+    String(String),  // Zero-overhead for strings
+    Binary(Vec<u8>), // Binary-encoded for other terms
+}
+
 pub struct TrieResource {
-    trie: Mutex<Trie<String>>,
+    trie: Mutex<Trie<HybridValue>>,
 }
 
 impl TrieResource {
@@ -31,10 +37,19 @@ fn new_trie() -> ResourceArc<TrieResource> {
 }
 
 #[rustler::nif]
-fn insert(trie_resource: ResourceArc<TrieResource>, key: String, value: String) -> Atom {
+fn insert(trie_resource: ResourceArc<TrieResource>, key: String, value: Term) -> Atom {
     match trie_resource.trie.lock() {
         Ok(mut trie) => {
-            trie.insert(&key, &value);
+            let hybrid_value = if let Ok(string_value) = value.decode::<String>() {
+                // Zero-overhead path for strings
+                HybridValue::String(string_value)
+            } else {
+                // Binary encode other terms using Erlang's external term format
+                let owned_binary = value.to_binary();
+                HybridValue::Binary(owned_binary.as_slice().to_vec())
+            };
+
+            trie.insert(&key, &hybrid_value);
             atoms::ok()
         }
         Err(_) => atoms::error(),
@@ -42,10 +57,24 @@ fn insert(trie_resource: ResourceArc<TrieResource>, key: String, value: String) 
 }
 
 #[rustler::nif]
-fn get(trie_resource: ResourceArc<TrieResource>, key: String) -> (Atom, Option<String>) {
+fn get(env: Env, trie_resource: ResourceArc<TrieResource>, key: String) -> (Atom, Option<Term>) {
     match trie_resource.trie.lock() {
         Ok(trie) => match trie.get(&key) {
-            Some(value) => (atoms::ok(), Some(value.clone())),
+            Some(hybrid_value) => {
+                let term = match hybrid_value {
+                    HybridValue::String(s) => s.encode(env),
+                    HybridValue::Binary(binary_data) => {
+                        // Try to decode the external term format
+                        // For now, just return the binary as-is to test the flow
+                        // TODO: Implement proper external term decoding
+                        let mut new_binary = NewBinary::new(env, binary_data.len());
+                        new_binary.as_mut_slice().copy_from_slice(binary_data);
+                        let binary: Binary = new_binary.into();
+                        binary.to_term(env)
+                    }
+                };
+                (atoms::ok(), Some(term))
+            }
             None => (atoms::not_found(), None),
         },
         Err(_) => (atoms::error(), None),
@@ -87,11 +116,15 @@ fn auto_complete(
 }
 
 #[rustler::nif]
-fn add_word_list(trie_resource: ResourceArc<TrieResource>, words: Vec<String>) -> Atom {
+#[allow(unused_variables)]
+fn add_word_list(env: Env, trie_resource: ResourceArc<TrieResource>, words: Vec<String>) -> Atom {
     match trie_resource.trie.lock() {
         Ok(mut trie) => {
             let word_refs: Vec<&str> = words.iter().map(|s| s.as_str()).collect();
-            trie.add_word_list(&word_refs, |word| word.to_string());
+            trie.add_word_list(&word_refs, |word| {
+                // For backward compatibility, we store the word as a string (zero overhead)
+                HybridValue::String(word.to_string())
+            });
             atoms::ok()
         }
         Err(_) => atoms::error(),

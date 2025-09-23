@@ -46,8 +46,8 @@ defmodule TrieHard.MixProject do
       files: ~w(lib .formatter.exs mix.exs README.md LICENSE CHANGELOG.md checksum-*.exs),
       licenses: ["Apache-2.0"],
       links: %{
-        "GitHub" => @source_url,
-        "Changelog" => "#{@source_url}/blob/main/CHANGELOG.md"
+        GitHub: @source_url,
+        Changelog: "#{@source_url}/blob/main/CHANGELOG.md"
       },
       maintainers: ["Niko"]
     ]

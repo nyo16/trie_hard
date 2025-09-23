@@ -5,7 +5,13 @@ authors = []
 edition = "2021"
 
 [lib]
+name = "trie_hard_native"
+path = "src/lib.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
 rustler = "0.37.0"
+
+[features]
+default = ["nif_version_2_15"]
+nif_version_2_15 = ["rustler/nif_version_2_15"]

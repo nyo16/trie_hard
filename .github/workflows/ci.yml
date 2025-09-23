@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - master
+      - feat/support_for_erlang_terms
 
 jobs:
   mix_test:
@@ -52,3 +53,9 @@ jobs:
         if: ${{ matrix.lint }}
 
       - run: mix test
+
+      - name: run rustfmt
+        run: cargo fmt --manifest-path=native/trie_hard_native/Cargo.toml --all -- --check
+
+      - name: run clippy
+        run: cargo clippy --manifest-path=native/trie_hard_native/Cargo.toml -- -Dwarnings

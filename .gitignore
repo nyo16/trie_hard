@@ -25,3 +25,7 @@ trie_again-*.tar
 # Rust binary artifacts
 /target/
 native/**/target/
+priv/
+
+# The checksum files for precompiled NIFs
+checksum-*.exs
