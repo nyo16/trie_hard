@@ -41,14 +41,12 @@ defmodule TrieHard.Native do
       x86_64-unknown-linux-musl
 
       x86_64-pc-windows-gnu
-      x86_64-pc-windows-msvc
     ),
     variants: %{
       "x86_64-unknown-linux-gnu" => variants_for_linux,
-      "x86_64-pc-windows-msvc" => other_variants,
       "x86_64-pc-windows-gnu" => other_variants
     },
-    nif_versions: ["2.15"],
+    nif_versions: ["2.15", "2.16"],
     mode: mode,
     force_build: System.get_env("TRIE_HARD_BUILD") in ["1", "true"]
 
