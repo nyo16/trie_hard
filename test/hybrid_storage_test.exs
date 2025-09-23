@@ -165,18 +165,30 @@ defmodule TrieHard.HybridStorageTest do
       trie = TrieHard.new()
 
       test_data = [
-        {"string", "test_string"},     # Zero overhead path
-        {"atom", :test_atom},          # Binary encoded
-        {"integer", 42},               # Binary encoded
-        {"float", 3.14},               # Binary encoded
-        {"list", [1, 2, 3]},          # Binary encoded
-        {"tuple", {:ok, "result"}},    # Binary encoded
-        {"map", %{key: "value"}},      # Binary encoded
-        {"pid", self()},               # Binary encoded
-        {"ref", make_ref()},           # Binary encoded
-        {"nil", nil},                  # Binary encoded
-        {"bool_true", true},           # Binary encoded
-        {"bool_false", false}          # Binary encoded
+        # Zero overhead path
+        {"string", "test_string"},
+        # Binary encoded
+        {"atom", :test_atom},
+        # Binary encoded
+        {"integer", 42},
+        # Binary encoded
+        {"float", 3.14},
+        # Binary encoded
+        {"list", [1, 2, 3]},
+        # Binary encoded
+        {"tuple", {:ok, "result"}},
+        # Binary encoded
+        {"map", %{key: "value"}},
+        # Binary encoded
+        {"pid", self()},
+        # Binary encoded
+        {"ref", make_ref()},
+        # Binary encoded
+        {"nil", nil},
+        # Binary encoded
+        {"bool_true", true},
+        # Binary encoded
+        {"bool_false", false}
       ]
 
       # Insert all different types
@@ -236,10 +248,14 @@ defmodule TrieHard.HybridStorageTest do
       trie = TrieHard.new()
 
       # Insert various types with common prefix
-      assert TrieHard.insert(trie, "prefix_string", "value") == :ok      # Zero overhead
-      assert TrieHard.insert(trie, "prefix_atom", :value) == :ok         # Binary encoded
-      assert TrieHard.insert(trie, "prefix_number", 42) == :ok           # Binary encoded
-      assert TrieHard.insert(trie, "prefix_map", %{key: "value"}) == :ok # Binary encoded
+      # Zero overhead
+      assert TrieHard.insert(trie, "prefix_string", "value") == :ok
+      # Binary encoded
+      assert TrieHard.insert(trie, "prefix_atom", :value) == :ok
+      # Binary encoded
+      assert TrieHard.insert(trie, "prefix_number", 42) == :ok
+      # Binary encoded
+      assert TrieHard.insert(trie, "prefix_map", %{key: "value"}) == :ok
 
       {:ok, results} = TrieHard.auto_complete(trie, "prefix_", 10)
 
@@ -276,12 +292,18 @@ defmodule TrieHard.HybridStorageTest do
 
       # Mix of zero-overhead strings and binary-encoded terms
       test_items = [
-        {"str1", "hello"},              # Zero overhead
-        {"atom1", :world},              # Binary encoded
-        {"str2", "elixir"},            # Zero overhead
-        {"num1", 42},                  # Binary encoded
-        {"str3", "rustler"},           # Zero overhead
-        {"map1", %{lang: "rust"}}      # Binary encoded
+        # Zero overhead
+        {"str1", "hello"},
+        # Binary encoded
+        {"atom1", :world},
+        # Zero overhead
+        {"str2", "elixir"},
+        # Binary encoded
+        {"num1", 42},
+        # Zero overhead
+        {"str3", "rustler"},
+        # Binary encoded
+        {"map1", %{lang: "rust"}}
       ]
 
       for {key, value} <- test_items do
