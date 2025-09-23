@@ -9,7 +9,7 @@ on:
   push:
     branches:
       - main
-      - master
+      - feat/support_for_erlang_terms
     paths:
       # Just run on main branch if "native" path changed.
       - "native/**"
