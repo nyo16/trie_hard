@@ -5,6 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - Unreleased
+
+### Breaking changes
+
+Return values no longer wrap results in `{:ok, _}` or use sentinel tuples. Internal failures
+(none are reachable) raise instead of returning `:error` tuples.
+
+| 0.2.x | 0.3.0 |
+|---|---|
+| `get(t, k)` → `{:ok, v}` \| `{:not_found, nil}` | `get(t, k)` → `{:ok, v}` \| `:error` |
+| `prefix_search(t, p)` → `{:ok, boolean}` | `prefix?(t, p)` → `boolean` (`prefix_search/2` removed) |
+| `auto_complete(t, p, n)` → `{:ok, [key]}` | `auto_complete(t, p, n)` → `[key]` |
+| `count_prefix(t, p)` → `{:ok, n}` | `count_prefix(t, p)` → `n` |
+| `delete(t, k)` → `:ok` always | `delete(t, k)` → `:ok` if the key existed, `:error` otherwise |
+| `insert/3`, `add_word_list/2` → `:ok` | unchanged |
+| `@type trie :: reference()` | `@opaque t` (`TrieHard.t()`); don't rely on it being a reference |
+
+Migration:
+
+```elixir
+# 0.2.x
+case TrieHard.get(trie, key) do
+  {:ok, value} -> value
+  {:not_found, nil} -> default
+end
+{:ok, words} = TrieHard.auto_complete(trie, prefix, 5)
+{:ok, count} = TrieHard.count_prefix(trie, prefix)
+{:ok, found?} = TrieHard.prefix_search(trie, prefix)
+
+# 0.3.0
+case TrieHard.get(trie, key) do
+  {:ok, value} -> value
+  :error -> default
+end
+words = TrieHard.auto_complete(trie, prefix, 5)
+count = TrieHard.count_prefix(trie, prefix)
+found? = TrieHard.prefix?(trie, prefix)
+```
+
+### Added
+
+- `TrieHard.new(layout: :radix)`: a path-compressed layout with identical results for every
+  operation. `new/0` keeps the `:sorted` layout. Unknown options or layouts raise `ArgumentError`.
+- `insert_many/2`: inserts `{key, value}` pairs from any enumerable, in chunks of 1,000 on a dirty
+  scheduler; not atomic (an invalid element raises `ArgumentError`, earlier chunks stay inserted).
+
 ## [0.2.9] - Unreleased
 
 ### Changed

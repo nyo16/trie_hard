@@ -40,7 +40,7 @@ MIX_ENV=bench TRIE_HARD_BUILD=true mix run bench/trie_bench.exs
 ```elixir
 def deps do
   [
-    {:trie_hard, "~> 0.2.9"}
+    {:trie_hard, "~> 0.3.0"}
   ]
 end
 ```
@@ -64,37 +64,44 @@ Documentation: [https://hexdocs.pm/trie_hard](https://hexdocs.pm/trie_hard).
 trie = TrieHard.new()
 
 :ok = TrieHard.insert(trie, "cat", "feline")
-:ok = TrieHard.insert(trie, "car", %{wheels: 4})
-:ok = TrieHard.insert(trie, "card", {:payment, :plastic})
+:ok = TrieHard.insert_many(trie, [{"car", %{wheels: 4}}, {"card", {:payment, :plastic}}])
 
 {:ok, "feline"} = TrieHard.get(trie, "cat")
-{:not_found, nil} = TrieHard.get(trie, "dog")
+:error = TrieHard.get(trie, "dog")
 
 # Lexicographic order; the limit keeps the first matches in that order
-{:ok, ["car", "card", "cat"]} = TrieHard.auto_complete(trie, "ca", 10)
-{:ok, ["car", "card"]} = TrieHard.auto_complete(trie, "ca", 2)
+["car", "card", "cat"] = TrieHard.auto_complete(trie, "ca", 10)
+["car", "card"] = TrieHard.auto_complete(trie, "ca", 2)
 
-{:ok, true} = TrieHard.prefix_search(trie, "ca")
-{:ok, false} = TrieHard.prefix_search(trie, "xyz")
+true = TrieHard.prefix?(trie, "ca")
+false = TrieHard.prefix?(trie, "xyz")
 
-{:ok, 3} = TrieHard.count_prefix(trie, "ca")
+3 = TrieHard.count_prefix(trie, "ca")
+
+:ok = TrieHard.delete(trie, "cat")
+:error = TrieHard.delete(trie, "cat")
 
 # Each word is stored with itself as the value
 :ok = TrieHard.add_word_list(trie, ["apple", "application", "apply"])
 {:ok, "apple"} = TrieHard.get(trie, "apple")
+
+# Path-compressed layout; same results for every operation
+radix = TrieHard.new(layout: :radix)
+:ok = TrieHard.insert(radix, "card", 1)
 ```
 
 ## API
 
 | Function | Returns |
 |---|---|
-| `new/0` | trie reference |
+| `new/1` | an opaque trie (`TrieHard.t()`); option `layout: :sorted \| :radix` |
 | `insert/3` | `:ok` |
-| `get/2` | `{:ok, value}` or `{:not_found, nil}` |
-| `delete/2` | `:ok` |
-| `prefix_search/2` | `{:ok, boolean}` — whether any key starts with the prefix |
-| `auto_complete/3` | `{:ok, [key]}` — up to `max_results` (default 10) keys in lexicographic order |
-| `count_prefix/2` | `{:ok, count}` — exact number of keys with the prefix |
+| `insert_many/2` | `:ok` — inserts `{key, value}` pairs from any enumerable |
+| `get/2` | `{:ok, value}` or `:error` |
+| `delete/2` | `:ok`, or `:error` when the key was absent |
+| `prefix?/2` | `boolean` — whether any key starts with the prefix |
+| `auto_complete/3` | up to `max_results` (default 10) keys, in lexicographic order |
+| `count_prefix/2` | exact number of keys with the prefix |
 | `add_word_list/2` | `:ok` — inserts each word with itself as the value |
 
 Keys must be UTF-8 binaries: a non-binary key raises `FunctionClauseError`, invalid UTF-8 raises `ArgumentError`.
@@ -106,9 +113,9 @@ operation first runs on the calling scheduler without blocking; if the trie is l
 the key is longer than 4 KiB, the value larger than 64 KiB, or a traversal needs more than 10,000
 node visits, it is retried on a dirty CPU scheduler, so normal schedulers are never blocked.
 
-`add_word_list/2` always runs on a dirty scheduler and sends the list in chunks of 1,000 words,
-so readers interleave with large bulk loads. It is not atomic: if an element is not a UTF-8
-binary, `ArgumentError` is raised and the chunks before it remain inserted.
+`add_word_list/2` and `insert_many/2` always run on a dirty scheduler and send their input in
+chunks of 1,000 entries, so readers interleave with large bulk loads. They are not atomic: an
+invalid element raises `ArgumentError` and the chunks before it remain inserted.
 
 ## Memory
 

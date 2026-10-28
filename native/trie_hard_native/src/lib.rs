@@ -293,6 +293,21 @@ fn count_prefix_dirty<'a>(env: Env<'a>, trie: ResourceArc<TrieResource>, prefix:
     count_prefix_impl(env, &trie, prefix, Mode::Blocking)
 }
 
+/// Always dirty: the Elixir side encodes values and chunks the pairs to bound
+/// the write-lock hold. Values are copied before the lock is taken.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn insert_many(trie: ResourceArc<TrieResource>, pairs: Vec<(&str, Binary)>) -> rustler::Atom {
+    let entries: Vec<(&str, Value)> = pairs
+        .into_iter()
+        .map(|(key, etf)| (key, Value::Etf(etf.as_slice().into())))
+        .collect();
+    let mut guard = trie.trie.write().unwrap_or_else(PoisonError::into_inner);
+    for (key, value) in entries {
+        guard.insert(key.as_bytes(), value);
+    }
+    atoms::ok()
+}
+
 /// Always dirty: the Elixir side chunks the list to bound the write-lock hold.
 #[rustler::nif(schedule = "DirtyCpu")]
 fn add_word_list(trie: ResourceArc<TrieResource>, words: Vec<&str>) -> rustler::Atom {

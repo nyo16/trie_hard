@@ -120,17 +120,21 @@ defmodule TrieHard.ValueStorageTest do
           {"other", self()}
         ])
 
-      assert TrieHard.auto_complete(trie, "prefix_", 10) ==
-               {:ok, ["prefix_atom", "prefix_map", "prefix_number", "prefix_string"]}
+      assert TrieHard.auto_complete(trie, "prefix_", 10) == [
+               "prefix_atom",
+               "prefix_map",
+               "prefix_number",
+               "prefix_string"
+             ]
 
-      assert TrieHard.count_prefix(trie, "") == {:ok, 5}
+      assert TrieHard.count_prefix(trie, "") == 5
     end
 
     test "1000 string values" do
       pairs = for i <- 1..1000, do: {"key#{i}", "value#{i}"}
       trie = round_trip(pairs)
 
-      assert TrieHard.count_prefix(trie, "key1") == {:ok, 112}
+      assert TrieHard.count_prefix(trie, "key1") == 112
     end
   end
 end

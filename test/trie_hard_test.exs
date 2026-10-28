@@ -27,7 +27,7 @@ defmodule TrieHardTest do
             2 -> &TrieHard.delete(&1, key)
             3 -> &TrieHard.get(&1, key)
             4 -> &TrieHard.count_prefix(&1, key)
-            5 -> &TrieHard.prefix_search(&1, key)
+            5 -> &TrieHard.prefix?(&1, key)
             6 -> &TrieHard.auto_complete(&1, String.slice(key, 0, 2), 5)
           end
 
@@ -47,9 +47,9 @@ defmodule TrieHardTest do
       test "a new trie is empty" do
         trie = TrieHard.new(layout: @layout)
 
-        assert TrieHard.count_prefix(trie, "") == {:ok, 0}
-        assert TrieHard.auto_complete(trie, "", 10) == {:ok, []}
-        assert TrieHard.get(trie, "") == {:not_found, nil}
+        assert TrieHard.count_prefix(trie, "") == 0
+        assert TrieHard.auto_complete(trie, "", 10) == []
+        assert TrieHard.get(trie, "") == :error
       end
 
       test "inserts and retrieves values" do
@@ -62,7 +62,7 @@ defmodule TrieHardTest do
       test "returns not_found for missing keys" do
         trie = TrieHard.new(layout: @layout)
 
-        assert TrieHard.get(trie, "missing") == {:not_found, nil}
+        assert TrieHard.get(trie, "missing") == :error
       end
 
       test "deletes keys" do
@@ -70,8 +70,8 @@ defmodule TrieHardTest do
 
         assert TrieHard.insert(trie, "hello", "world") == :ok
         assert TrieHard.delete(trie, "hello") == :ok
-        assert TrieHard.get(trie, "hello") == {:not_found, nil}
-        assert TrieHard.count_prefix(trie, "") == {:ok, 0}
+        assert TrieHard.get(trie, "hello") == :error
+        assert TrieHard.count_prefix(trie, "") == 0
       end
 
       test "deleting a key keeps keys that share its prefix" do
@@ -79,10 +79,10 @@ defmodule TrieHardTest do
         Enum.each(["car", "card", "cart"], &TrieHard.insert(trie, &1, &1))
 
         assert TrieHard.delete(trie, "car") == :ok
-        assert TrieHard.auto_complete(trie, "car", 10) == {:ok, ["card", "cart"]}
+        assert TrieHard.auto_complete(trie, "car", 10) == ["card", "cart"]
 
         assert TrieHard.delete(trie, "card") == :ok
-        assert TrieHard.auto_complete(trie, "", 10) == {:ok, ["cart"]}
+        assert TrieHard.auto_complete(trie, "", 10) == ["cart"]
         assert TrieHard.get(trie, "cart") == {:ok, "cart"}
       end
 
@@ -113,33 +113,32 @@ defmodule TrieHardTest do
       end
 
       test "prefix search finds existing prefixes", %{trie: trie} do
-        assert TrieHard.prefix_search(trie, "ca") == {:ok, true}
-        assert TrieHard.prefix_search(trie, "car") == {:ok, true}
-        assert TrieHard.prefix_search(trie, "do") == {:ok, true}
-        assert TrieHard.prefix_search(trie, "") == {:ok, true}
+        assert TrieHard.prefix?(trie, "ca")
+        assert TrieHard.prefix?(trie, "car")
+        assert TrieHard.prefix?(trie, "do")
+        assert TrieHard.prefix?(trie, "")
       end
 
       test "prefix search returns false for non-existing prefixes", %{trie: trie} do
-        assert TrieHard.prefix_search(trie, "xyz") == {:ok, false}
-        assert TrieHard.prefix_search(trie, "bat") == {:ok, false}
-        assert TrieHard.prefix_search(trie, "cards") == {:ok, false}
+        refute TrieHard.prefix?(trie, "xyz")
+        refute TrieHard.prefix?(trie, "bat")
+        refute TrieHard.prefix?(trie, "cards")
       end
 
       test "auto complete returns every match in lexicographic order", %{trie: trie} do
-        assert TrieHard.auto_complete(trie, "ca", 10) == {:ok, ["car", "card", "care", "cat"]}
+        assert TrieHard.auto_complete(trie, "ca", 10) == ["car", "card", "care", "cat"]
       end
 
       test "auto complete returns the first matches in lexicographic order", %{trie: trie} do
-        assert TrieHard.auto_complete(trie, "ca", 2) == {:ok, ["car", "card"]}
+        assert TrieHard.auto_complete(trie, "ca", 2) == ["car", "card"]
       end
 
       test "auto complete with a zero limit returns nothing", %{trie: trie} do
-        assert TrieHard.auto_complete(trie, "ca", 0) == {:ok, []}
+        assert TrieHard.auto_complete(trie, "ca", 0) == []
       end
 
       test "auto complete with empty prefix returns all words", %{trie: trie} do
-        assert TrieHard.auto_complete(trie, "", 10) ==
-                 {:ok, ["car", "card", "care", "cat", "dog"]}
+        assert TrieHard.auto_complete(trie, "", 10) == ["car", "card", "care", "cat", "dog"]
       end
 
       test "auto complete without a limit returns at most 10 words" do
@@ -147,7 +146,7 @@ defmodule TrieHardTest do
         words = for i <- 10..29, do: "w#{i}"
         TrieHard.add_word_list(trie, words)
 
-        assert TrieHard.auto_complete(trie, "w") == {:ok, Enum.take(words, 10)}
+        assert TrieHard.auto_complete(trie, "w") == Enum.take(words, 10)
       end
 
       test "auto complete order does not depend on insertion order" do
@@ -157,16 +156,16 @@ defmodule TrieHardTest do
         Enum.each(words, &TrieHard.insert(forward, &1, 1))
         words |> Enum.reverse() |> Enum.each(&TrieHard.insert(backward, &1, 1))
 
-        expected = {:ok, ["ca", "café", "car", "card", "care", "cat"]}
+        expected = ["ca", "café", "car", "card", "care", "cat"]
         assert TrieHard.auto_complete(forward, "ca", 10) == expected
         assert TrieHard.auto_complete(backward, "ca", 10) == expected
       end
 
       test "count_prefix returns correct counts", %{trie: trie} do
-        assert TrieHard.count_prefix(trie, "ca") == {:ok, 4}
-        assert TrieHard.count_prefix(trie, "car") == {:ok, 3}
-        assert TrieHard.count_prefix(trie, "do") == {:ok, 1}
-        assert TrieHard.count_prefix(trie, "xyz") == {:ok, 0}
+        assert TrieHard.count_prefix(trie, "ca") == 4
+        assert TrieHard.count_prefix(trie, "car") == 3
+        assert TrieHard.count_prefix(trie, "do") == 1
+        assert TrieHard.count_prefix(trie, "xyz") == 0
       end
     end
 
@@ -186,7 +185,7 @@ defmodule TrieHardTest do
         trie = TrieHard.new(layout: @layout)
 
         assert TrieHard.add_word_list(trie, []) == :ok
-        assert TrieHard.count_prefix(trie, "") == {:ok, 0}
+        assert TrieHard.count_prefix(trie, "") == 0
       end
 
       test "add_word_list enables autocomplete" do
@@ -194,8 +193,8 @@ defmodule TrieHardTest do
         words = ["apple", "application", "apply", "banana", "band"]
 
         assert TrieHard.add_word_list(trie, words) == :ok
-        assert TrieHard.auto_complete(trie, "app", 10) == {:ok, ["apple", "application", "apply"]}
-        assert TrieHard.auto_complete(trie, "ban", 10) == {:ok, ["banana", "band"]}
+        assert TrieHard.auto_complete(trie, "app", 10) == ["apple", "application", "apply"]
+        assert TrieHard.auto_complete(trie, "ban", 10) == ["banana", "band"]
       end
 
       test "add_word_list with a non-string element raises and keeps earlier chunks" do
@@ -203,8 +202,8 @@ defmodule TrieHardTest do
         words = for(i <- 1..1_000, do: "w#{i}") ++ ["ok", :not_a_string]
 
         assert_raise ArgumentError, fn -> TrieHard.add_word_list(trie, words) end
-        assert TrieHard.count_prefix(trie, "w") == {:ok, 1_000}
-        assert TrieHard.get(trie, "ok") == {:not_found, nil}
+        assert TrieHard.count_prefix(trie, "w") == 1_000
+        assert TrieHard.get(trie, "ok") == :error
       end
     end
 
@@ -214,8 +213,8 @@ defmodule TrieHardTest do
 
         assert TrieHard.insert(trie, "", "empty") == :ok
         assert TrieHard.get(trie, "") == {:ok, "empty"}
-        assert TrieHard.prefix_search(trie, "") == {:ok, true}
-        assert TrieHard.auto_complete(trie, "", 10) == {:ok, [""]}
+        assert TrieHard.prefix?(trie, "")
+        assert TrieHard.auto_complete(trie, "", 10) == [""]
       end
 
       test "handles unicode characters" do
@@ -228,8 +227,8 @@ defmodule TrieHardTest do
         assert TrieHard.get(trie, "café") == {:ok, "coffee"}
         assert TrieHard.get(trie, "naïve") == {:ok, "innocent"}
         assert TrieHard.get(trie, "🦀") == {:ok, "crab"}
-        assert TrieHard.auto_complete(trie, "caf", 5) == {:ok, ["café"]}
-        assert TrieHard.auto_complete(trie, "", 5) == {:ok, ["café", "naïve", "🦀"]}
+        assert TrieHard.auto_complete(trie, "caf", 5) == ["café"]
+        assert TrieHard.auto_complete(trie, "", 5) == ["café", "naïve", "🦀"]
       end
 
       test "handles very long strings" do
@@ -247,16 +246,19 @@ defmodule TrieHardTest do
         assert TrieHard.insert(trie, "key", "value1") == :ok
         assert TrieHard.insert(trie, "key", "value2") == :ok
         assert TrieHard.get(trie, "key") == {:ok, "value2"}
-        assert TrieHard.count_prefix(trie, "key") == {:ok, 1}
+        assert TrieHard.count_prefix(trie, "key") == 1
       end
 
-      test "delete non-existing key doesn't error" do
+      test "delete returns :error for absent keys and keeps the rest" do
         trie = TrieHard.new(layout: @layout)
         TrieHard.insert(trie, "card", 1)
 
-        assert TrieHard.delete(trie, "non-existing") == :ok
-        assert TrieHard.delete(trie, "car") == :ok
+        assert TrieHard.delete(trie, "non-existing") == :error
+        assert TrieHard.delete(trie, "car") == :error
+        assert TrieHard.delete(trie, "cards") == :error
         assert TrieHard.get(trie, "card") == {:ok, 1}
+        assert TrieHard.delete(trie, "card") == :ok
+        assert TrieHard.delete(trie, "card") == :error
       end
 
       test "handles 1000 words" do
@@ -265,11 +267,11 @@ defmodule TrieHardTest do
 
         assert TrieHard.add_word_list(trie, words) == :ok
         assert TrieHard.get(trie, "word500") == {:ok, "word500"}
-        assert TrieHard.prefix_search(trie, "word1") == {:ok, true}
-        assert TrieHard.count_prefix(trie, "word1") == {:ok, 112}
+        assert TrieHard.prefix?(trie, "word1")
+        assert TrieHard.count_prefix(trie, "word1") == 112
 
         expected = words |> Enum.filter(&String.starts_with?(&1, "word1")) |> Enum.sort()
-        assert TrieHard.auto_complete(trie, "word1", 20) == {:ok, Enum.take(expected, 20)}
+        assert TrieHard.auto_complete(trie, "word1", 20) == Enum.take(expected, 20)
       end
     end
 
@@ -281,7 +283,7 @@ defmodule TrieHardTest do
           assert_raise FunctionClauseError, fn -> TrieHard.insert(trie, key, 1) end
           assert_raise FunctionClauseError, fn -> TrieHard.get(trie, key) end
           assert_raise FunctionClauseError, fn -> TrieHard.delete(trie, key) end
-          assert_raise FunctionClauseError, fn -> TrieHard.prefix_search(trie, key) end
+          assert_raise FunctionClauseError, fn -> TrieHard.prefix?(trie, key) end
           assert_raise FunctionClauseError, fn -> TrieHard.auto_complete(trie, key, 1) end
           assert_raise FunctionClauseError, fn -> TrieHard.count_prefix(trie, key) end
         end
@@ -318,7 +320,7 @@ defmodule TrieHardTest do
         for key <- ["café", "🦀", "e\u0301"] do
           assert TrieHard.insert(trie, key, key) == :ok
           assert TrieHard.delete(trie, key) == :ok
-          assert TrieHard.get(trie, key) == {:not_found, nil}
+          assert TrieHard.get(trie, key) == :error
           assert TrieHard.insert(trie, key, "again") == :ok
           assert TrieHard.get(trie, key) == {:ok, "again"}
         end
@@ -328,8 +330,8 @@ defmodule TrieHardTest do
         trie = TrieHard.new(layout: @layout)
         assert TrieHard.add_word_list(trie, for(i <- 1..1000, do: "word#{i}")) == :ok
 
-        assert TrieHard.count_prefix(trie, "word") == {:ok, 1000}
-        assert TrieHard.count_prefix(trie, "") == {:ok, 1000}
+        assert TrieHard.count_prefix(trie, "word") == 1000
+        assert TrieHard.count_prefix(trie, "") == 1000
       end
 
       test "very deep keys do not overflow the scheduler stack" do
@@ -337,18 +339,58 @@ defmodule TrieHardTest do
         key = String.duplicate("a", 10_000)
 
         assert TrieHard.insert(trie, key, 1) == :ok
-        assert TrieHard.auto_complete(trie, "", 1) == {:ok, [key]}
-        assert TrieHard.count_prefix(trie, "a") == {:ok, 1}
+        assert TrieHard.auto_complete(trie, "", 1) == [key]
+        assert TrieHard.count_prefix(trie, "a") == 1
         assert TrieHard.delete(trie, key) == :ok
-        assert TrieHard.get(trie, key) == {:not_found, nil}
+        assert TrieHard.get(trie, key) == :error
       end
 
-      test "prefix_search on an empty trie is false" do
-        assert TrieHard.prefix_search(TrieHard.new(layout: @layout), "") == {:ok, false}
+      test "prefix? on an empty trie is false" do
+        refute TrieHard.prefix?(TrieHard.new(layout: @layout), "")
       end
     end
 
     describe "#{layout}: values and bulk loads" do
+      test "insert_many round-trips mixed values across chunks" do
+        trie = TrieHard.new(layout: @layout)
+        mixed = [{"atom", :v}, {"map", %{a: [1, 2]}}, {"tuple", {1, "x"}}, {"pid", self()}]
+        many = for i <- 1..2_500, do: {"k#{i}", i}
+
+        assert TrieHard.insert_many(trie, mixed ++ many) == :ok
+
+        for {key, value} <- mixed ++ many do
+          assert TrieHard.get(trie, key) == {:ok, value}
+        end
+
+        assert TrieHard.count_prefix(trie, "k") == 2_500
+      end
+
+      test "insert_many accepts any enumerable and overwrites existing keys" do
+        trie = TrieHard.new(layout: @layout)
+        TrieHard.insert(trie, "a", :old)
+        TrieHard.add_word_list(trie, ["b"])
+
+        assert TrieHard.insert_many(trie, %{"a" => :new, "b" => 2}) == :ok
+        assert TrieHard.insert_many(trie, Stream.map(1..3, &{"s#{&1}", &1})) == :ok
+        assert TrieHard.insert_many(trie, [{"c", 1}, {"c", 2}]) == :ok
+
+        assert TrieHard.get(trie, "a") == {:ok, :new}
+        assert TrieHard.get(trie, "b") == {:ok, 2}
+        assert TrieHard.get(trie, "c") == {:ok, 2}
+        assert TrieHard.auto_complete(trie, "s") == ["s1", "s2", "s3"]
+      end
+
+      test "insert_many raises ArgumentError on invalid elements, keeping earlier chunks" do
+        trie = TrieHard.new(layout: @layout)
+        valid = for i <- 1..1_000, do: {"k#{i}", i}
+
+        for bad <- [{:atom_key, 1}, :not_a_tuple, {"a", 1, 2}, {<<0xFF>>, 1}] do
+          assert_raise ArgumentError, fn -> TrieHard.insert_many(trie, valid ++ [bad]) end
+        end
+
+        assert TrieHard.count_prefix(trie, "k") == 1_000
+      end
+
       test "get after add_word_list returns the word" do
         trie = TrieHard.new(layout: @layout)
         assert TrieHard.add_word_list(trie, ["alpha", "beta"]) == :ok
@@ -379,11 +421,11 @@ defmodule TrieHardTest do
 
         assert TrieHard.insert(trie, key, :v) == :ok
         assert TrieHard.get(trie, key) == {:ok, :v}
-        assert TrieHard.prefix_search(trie, key) == {:ok, true}
-        assert TrieHard.count_prefix(trie, key) == {:ok, 1}
-        assert TrieHard.auto_complete(trie, key, 5) == {:ok, [key]}
+        assert TrieHard.prefix?(trie, key)
+        assert TrieHard.count_prefix(trie, key) == 1
+        assert TrieHard.auto_complete(trie, key, 5) == [key]
         assert TrieHard.delete(trie, key) == :ok
-        assert TrieHard.get(trie, key) == {:not_found, nil}
+        assert TrieHard.get(trie, key) == :error
       end
     end
 
@@ -422,7 +464,7 @@ defmodule TrieHardTest do
             fn i ->
               for _ <- 1..20 do
                 {:ok, :data} = TrieHard.get(trie, "shared")
-                {:ok, found} = TrieHard.auto_complete(trie, "w#{i}", 5)
+                found = TrieHard.auto_complete(trie, "w#{i}", 5)
                 true = Enum.all?(found, &String.starts_with?(&1, "w#{i}"))
               end
 
@@ -435,7 +477,7 @@ defmodule TrieHardTest do
 
         assert Task.await(writer, 30_000) == :ok
         assert readers == List.duplicate({:ok, :done}, 50)
-        assert TrieHard.count_prefix(trie, "w") == {:ok, 200_000}
+        assert TrieHard.count_prefix(trie, "w") == 200_000
         assert TrieHard.get(trie, "w200000") == {:ok, "w200000"}
       end
     end

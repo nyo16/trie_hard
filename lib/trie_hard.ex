@@ -6,7 +6,7 @@ defmodule TrieHard do
   ## Features
 
   - **Fast**: sub-microsecond lookups and prefix checks
-  - **Compact**: shared prefixes, byte-keyed nodes with sorted child arrays
+  - **Compact**: shared prefixes; two node layouts (see `new/1`)
   - **Deterministic**: `auto_complete/3` returns keys in lexicographic order
   - **Unicode**: keys are UTF-8 strings; non-binary keys raise `FunctionClauseError`,
     invalid UTF-8 raises `ArgumentError`
@@ -18,14 +18,16 @@ defmodule TrieHard do
       iex> trie = TrieHard.new()
       iex> TrieHard.insert(trie, "cat", :feline)
       :ok
-      iex> TrieHard.insert(trie, "car", %{type: "vehicle", wheels: 4})
-      :ok
-      iex> TrieHard.insert(trie, "card", {"payment", "plastic"})
+      iex> TrieHard.insert_many(trie, [{"car", %{wheels: 4}}, {"card", {"payment", "plastic"}}])
       :ok
       iex> TrieHard.get(trie, "cat")
       {:ok, :feline}
+      iex> TrieHard.get(trie, "dog")
+      :error
       iex> TrieHard.auto_complete(trie, "ca", 10)
-      {:ok, ["car", "card", "cat"]}
+      ["car", "card", "cat"]
+      iex> TrieHard.count_prefix(trie, "car")
+      2
 
   ## Concurrency
 
@@ -34,7 +36,8 @@ defmodule TrieHard do
   scheduler without blocking; when the trie is locked by a writer, the key is
   longer than 4 KiB, the value is larger than 64 KiB, or a traversal needs more
   than 10,000 node visits, it is transparently retried on a dirty CPU scheduler.
-  `add_word_list/2` always runs on a dirty scheduler, in chunks of 1,000 words.
+  `add_word_list/2` and `insert_many/2` always run on a dirty scheduler, in chunks
+  of 1,000 entries.
 
   Values are encoded with `:erlang.term_to_binary/1` and decoded with
   `:erlang.binary_to_term/2` (`[:safe]`) in the calling process, never inside
@@ -49,7 +52,7 @@ defmodule TrieHard do
 
   alias TrieHard.Native
 
-  @type trie :: reference()
+  @opaque t :: reference()
   @type key :: String.t()
   @type value :: term()
   @typedoc "Node layout, see `new/1`."
@@ -57,8 +60,8 @@ defmodule TrieHard do
 
   @layouts [:sorted, :radix]
 
-  # Words per add_word_list NIF call; bounds how long the write lock is held.
-  @word_list_chunk 1_000
+  # Entries per bulk NIF call; bounds how long the write lock is held.
+  @chunk_size 1_000
 
   @doc """
   Creates a new empty trie.
@@ -66,12 +69,9 @@ defmodule TrieHard do
   ## Options
 
   - `:layout` - `:sorted` (default) or `:radix`.
-    - `:sorted` stores one node per key byte with sorted child arrays. Inserts and
-      deletes are simple and fast; long keys without shared prefixes cost one node
-      per byte.
-    - `:radix` is path-compressed: a run of bytes without branches is one node.
-      It uses less memory for long or sparse keys; inserts and deletes may split
-      or merge edges.
+    - `:sorted` stores one node per key byte with sorted child arrays.
+    - `:radix` is path-compressed: a run of bytes without branches is a single
+      node, so inserts and deletes may split or merge edges.
 
     Both layouts give identical results for every operation.
 
@@ -81,14 +81,14 @@ defmodule TrieHard do
 
       iex> trie = TrieHard.new()
       iex> TrieHard.count_prefix(trie, "")
-      {:ok, 0}
+      0
       iex> radix = TrieHard.new(layout: :radix)
       iex> TrieHard.insert(radix, "card", 1)
       :ok
       iex> TrieHard.auto_complete(radix, "ca")
-      {:ok, ["card"]}
+      ["card"]
   """
-  @spec new([{:layout, layout()}]) :: trie()
+  @spec new([{:layout, layout()}]) :: t()
   def new(opts \\ []) do
     opts = Keyword.validate!(opts, layout: :sorted)
     layout = opts[:layout]
@@ -102,12 +102,7 @@ defmodule TrieHard do
   end
 
   @doc """
-  Inserts a key-value pair into the trie.
-
-  ## Parameters
-  - `trie` - The trie reference
-  - `key` - The key to insert (string)
-  - `value` - The value to associate with the key (any Erlang term)
+  Inserts `value` (any term) under `key`, replacing an existing value.
 
   ## Examples
 
@@ -116,10 +111,8 @@ defmodule TrieHard do
       :ok
       iex> TrieHard.insert(trie, "config", %{timeout: 5000, retry: true})
       :ok
-      iex> TrieHard.insert(trie, "data", {:ok, [1, 2, 3]})
-      :ok
   """
-  @spec insert(trie(), key(), value()) :: :ok
+  @spec insert(t(), key(), value()) :: :ok
   def insert(trie, key, value) when is_binary(key) do
     etf = :erlang.term_to_binary(value)
 
@@ -129,32 +122,51 @@ defmodule TrieHard do
   end
 
   @doc """
-  Retrieves a value by exact key match.
+  Inserts every `{key, value}` pair from `entries` (any enumerable).
 
-  ## Parameters
-  - `trie` - The trie reference
-  - `key` - The key to look up
-
-  ## Returns
-  - `{:ok, value}` if the key exists
-  - `{:not_found, nil}` if the key doesn't exist
-  - `{:error, nil}` on internal error
+  Later pairs win over earlier ones with the same key. Pairs are sent to the NIF
+  in chunks of #{@chunk_size}, so the write lock is never held for long. The
+  operation is not atomic: an invalid element (not a `{binary, term}` tuple, or
+  a key that is not UTF-8) raises `ArgumentError`, and the chunks before it stay
+  inserted.
 
   ## Examples
 
       iex> trie = TrieHard.new()
-      iex> TrieHard.insert(trie, "hello", "world")
+      iex> TrieHard.insert_many(trie, %{"a" => 1, "b" => [2]})
       :ok
-      iex> TrieHard.get(trie, "hello")
-      {:ok, "world"}
+      iex> TrieHard.get(trie, "b")
+      {:ok, [2]}
+  """
+  @spec insert_many(t(), Enumerable.t({key(), value()})) :: :ok
+  def insert_many(trie, entries) do
+    entries
+    |> Stream.map(&encode_entry/1)
+    |> Stream.chunk_every(@chunk_size)
+    |> Enum.each(&Native.insert_many(trie, &1))
+  end
+
+  defp encode_entry({key, value}) when is_binary(key), do: {key, :erlang.term_to_binary(value)}
+
+  defp encode_entry(other) do
+    raise ArgumentError,
+          "expected a {key, value} tuple with a binary key, got: #{inspect(other)}"
+  end
+
+  @doc """
+  Returns `{:ok, value}` for an exact key match, or `:error`.
+
+  ## Examples
+
+      iex> trie = TrieHard.new()
       iex> TrieHard.insert(trie, "data", {:ok, %{id: 123}})
       :ok
       iex> TrieHard.get(trie, "data")
       {:ok, {:ok, %{id: 123}}}
       iex> TrieHard.get(trie, "missing")
-      {:not_found, nil}
+      :error
   """
-  @spec get(trie(), key()) :: {:ok, value()} | {:not_found, nil}
+  @spec get(t(), key()) :: {:ok, value()} | :error
   def get(trie, key) when is_binary(key) do
     trie
     |> Native.get(key)
@@ -162,16 +174,14 @@ defmodule TrieHard do
     |> case do
       {:ok, etf} -> {:ok, :erlang.binary_to_term(etf, [:safe])}
       :self_key -> {:ok, key}
-      :not_found -> {:not_found, nil}
+      :not_found -> :error
     end
   end
 
   @doc """
-  Removes a key and its associated value from the trie.
+  Removes `key`. Returns `:ok` if it was present, `:error` otherwise.
 
-  ## Parameters
-  - `trie` - The trie reference
-  - `key` - The key to remove
+  Keys that share a prefix with `key` are unaffected.
 
   ## Examples
 
@@ -180,98 +190,68 @@ defmodule TrieHard do
       :ok
       iex> TrieHard.delete(trie, "hello")
       :ok
-      iex> TrieHard.get(trie, "hello")
-      {:not_found, nil}
+      iex> TrieHard.delete(trie, "hello")
+      :error
   """
-  @spec delete(trie(), key()) :: :ok
+  @spec delete(t(), key()) :: :ok | :error
   def delete(trie, key) when is_binary(key) do
     trie
     |> Native.delete(key)
     |> fast_or_dirty(fn -> Native.delete_dirty(trie, key) end)
-
-    :ok
+    |> if(do: :ok, else: :error)
   end
 
   @doc """
-  Checks if any words in the trie start with the given prefix.
-
-  ## Parameters
-  - `trie` - The trie reference
-  - `prefix` - The prefix to search for
-
-  ## Returns
-  - `{:ok, true}` if words with the prefix exist
-  - `{:ok, false}` if no words with the prefix exist
-  - `{:error, false}` on internal error
+  Returns whether at least one stored key starts with `prefix`.
 
   ## Examples
 
       iex> trie = TrieHard.new()
       iex> TrieHard.insert(trie, "cat", "feline")
       :ok
-      iex> TrieHard.prefix_search(trie, "ca")
-      {:ok, true}
-      iex> TrieHard.prefix_search(trie, "dog")
-      {:ok, false}
+      iex> TrieHard.prefix?(trie, "ca")
+      true
+      iex> TrieHard.prefix?(trie, "dog")
+      false
   """
-  @spec prefix_search(trie(), String.t()) :: {:ok, boolean()}
-  def prefix_search(trie, prefix) when is_binary(prefix) do
-    found =
-      trie
-      |> Native.prefix_search(prefix)
-      |> fast_or_dirty(fn -> Native.prefix_search_dirty(trie, prefix) end)
-
-    {:ok, found}
+  @spec prefix?(t(), String.t()) :: boolean()
+  def prefix?(trie, prefix) when is_binary(prefix) do
+    trie
+    |> Native.prefix_search(prefix)
+    |> fast_or_dirty(fn -> Native.prefix_search_dirty(trie, prefix) end)
   end
 
   @doc """
-  Returns words that start with the given prefix, up to max_results.
+  Returns up to `max_results` (default 10) stored keys starting with `prefix`.
 
-  ## Parameters
-  - `trie` - The trie reference
-  - `prefix` - The prefix to search for
-  - `max_results` - Maximum number of results to return (default: 10)
-
-  ## Returns
-  - `{:ok, [String.t()]}` - up to `max_results` matching words, in lexicographic
-    (codepoint) order; when there are more matches, the first ones in that order
+  Keys come back in lexicographic (codepoint) order; when there are more
+  matches than `max_results`, the first ones in that order are returned.
 
   ## Examples
 
       iex> trie = TrieHard.new()
-      iex> TrieHard.insert(trie, "cat", "1")
-      :ok
-      iex> TrieHard.insert(trie, "car", "2")
-      :ok
-      iex> TrieHard.insert(trie, "card", "3")
+      iex> TrieHard.add_word_list(trie, ["cat", "car", "card"])
       :ok
       iex> TrieHard.auto_complete(trie, "ca", 2)
-      {:ok, ["car", "card"]}
+      ["car", "card"]
       iex> TrieHard.auto_complete(trie, "ca")
-      {:ok, ["car", "card", "cat"]}
+      ["car", "card", "cat"]
   """
-  @spec auto_complete(trie(), String.t(), non_neg_integer()) :: {:ok, [String.t()]}
+  @spec auto_complete(t(), String.t(), non_neg_integer()) :: [String.t()]
   def auto_complete(trie, prefix, max_results \\ 10)
       when is_binary(prefix) and is_integer(max_results) and max_results >= 0 do
-    words =
-      trie
-      |> Native.auto_complete(prefix, max_results)
-      |> fast_or_dirty(fn -> Native.auto_complete_dirty(trie, prefix, max_results) end)
-
-    {:ok, words}
+    trie
+    |> Native.auto_complete(prefix, max_results)
+    |> fast_or_dirty(fn -> Native.auto_complete_dirty(trie, prefix, max_results) end)
   end
 
   @doc """
-  Efficiently inserts multiple words at once.
+  Inserts each word with itself as the value.
 
-  Each word will be inserted with itself as the value. Words are sent to the NIF in
-  chunks of #{@word_list_chunk} so the write lock is never held for long; readers
-  interleave between chunks. The operation is not atomic: if an element is not a
-  UTF-8 binary, `ArgumentError` is raised and the chunks before it stay inserted.
-
-  ## Parameters
-  - `trie` - The trie reference
-  - `words` - List of words to insert
+  Words are sent to the NIF in chunks of #{@chunk_size} so the write lock is never
+  held for long; readers interleave between chunks. The operation is not atomic:
+  if an element is not a UTF-8 binary, `ArgumentError` is raised and the chunks
+  before it stay inserted.
 
   ## Examples
 
@@ -281,17 +261,15 @@ defmodule TrieHard do
       iex> TrieHard.get(trie, "cat")
       {:ok, "cat"}
   """
-  @spec add_word_list(trie(), [String.t()]) :: :ok
+  @spec add_word_list(t(), [String.t()]) :: :ok
   def add_word_list(trie, words) when is_list(words) do
     words
-    |> Stream.chunk_every(@word_list_chunk)
+    |> Stream.chunk_every(@chunk_size)
     |> Enum.each(&Native.add_word_list(trie, &1))
   end
 
   @doc """
-  Returns the number of words with a given prefix.
-
-  Counts every stored key under `prefix`; the result is exact and not capped.
+  Returns the exact number of stored keys starting with `prefix`.
 
   ## Examples
 
@@ -299,18 +277,15 @@ defmodule TrieHard do
       iex> TrieHard.add_word_list(trie, ["cat", "car", "card", "dog"])
       :ok
       iex> TrieHard.count_prefix(trie, "ca")
-      {:ok, 3}
-      iex> TrieHard.count_prefix(trie, "do")
-      {:ok, 1}
+      3
+      iex> TrieHard.count_prefix(trie, "")
+      4
   """
-  @spec count_prefix(trie(), String.t()) :: {:ok, non_neg_integer()}
+  @spec count_prefix(t(), String.t()) :: non_neg_integer()
   def count_prefix(trie, prefix) when is_binary(prefix) do
-    count =
-      trie
-      |> Native.count_prefix(prefix)
-      |> fast_or_dirty(fn -> Native.count_prefix_dirty(trie, prefix) end)
-
-    {:ok, count}
+    trie
+    |> Native.count_prefix(prefix)
+    |> fast_or_dirty(fn -> Native.count_prefix_dirty(trie, prefix) end)
   end
 
   # Fast NIFs run on the calling (normal) scheduler and return `:dirty` instead of

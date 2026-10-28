@@ -24,7 +24,7 @@ defmodule TrieBench do
     trie = build(words)
     :erlang.garbage_collect()
     loaded = rss()
-    {:ok, @memory_words} = TrieHard.count_prefix(trie, "word_")
+    @memory_words = TrieHard.count_prefix(trie, "word_")
     div(loaded - before, @memory_words)
   end
 
@@ -47,13 +47,13 @@ Benchee.run(
     end,
     "add_word_list/2 x1000 (fresh trie)" => fn -> TrieHard.add_word_list(TrieHard.new(), batch) end,
     "get/2 hit" => fn -> {:ok, _} = TrieHard.get(trie, "word_54321_suffix") end,
-    "get/2 miss" => fn -> {:not_found, nil} = TrieHard.get(trie, "word_54321_suffiy") end,
-    "prefix_search/2" => fn -> {:ok, true} = TrieHard.prefix_search(trie, "word_5432") end,
-    "auto_complete/3 10" => fn -> {:ok, _} = TrieHard.auto_complete(trie, "word_1", 10) end,
-    "auto_complete/3 100" => fn -> {:ok, _} = TrieHard.auto_complete(trie, "word_1", 100) end,
-    "count_prefix/2 (111 keys)" => fn -> {:ok, 111} = TrieHard.count_prefix(trie, "word_123") end,
+    "get/2 miss" => fn -> :error = TrieHard.get(trie, "word_54321_suffiy") end,
+    "prefix?/2" => fn -> true = TrieHard.prefix?(trie, "word_5432") end,
+    "auto_complete/3 10" => fn -> _ = TrieHard.auto_complete(trie, "word_1", 10) end,
+    "auto_complete/3 100" => fn -> _ = TrieHard.auto_complete(trie, "word_1", 100) end,
+    "count_prefix/2 (111 keys)" => fn -> 111 = TrieHard.count_prefix(trie, "word_123") end,
     "count_prefix/2 (11,112 keys, dirty)" => fn ->
-      {:ok, 11_112} = TrieHard.count_prefix(trie, "word_1")
+      11_112 = TrieHard.count_prefix(trie, "word_1")
     end
   },
   warmup: 0.5,

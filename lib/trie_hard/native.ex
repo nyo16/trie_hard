@@ -32,6 +32,7 @@ defmodule TrieHard.Native do
   def new_trie(_layout), do: :erlang.nif_error(:nif_not_loaded)
   def insert(_trie, _key, _etf), do: :erlang.nif_error(:nif_not_loaded)
   def insert_dirty(_trie, _key, _etf), do: :erlang.nif_error(:nif_not_loaded)
+  def insert_many(_trie, _pairs), do: :erlang.nif_error(:nif_not_loaded)
   def get(_trie, _key), do: :erlang.nif_error(:nif_not_loaded)
   def get_dirty(_trie, _key), do: :erlang.nif_error(:nif_not_loaded)
   def delete(_trie, _key), do: :erlang.nif_error(:nif_not_loaded)
