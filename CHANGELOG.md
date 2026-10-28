@@ -5,6 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.8] - 2026-10-28
+
+### Fixed
+
+- `delete/2` no longer panics on keys containing non-ASCII characters (e.g. `"café"`, `"🦀"`);
+  a panic previously also poisoned the trie so every later call returned `:error`.
+  Deletion is now iterative and linear in the key length.
+- Very long keys (10,000+ characters) no longer overflow the scheduler stack in
+  `auto_complete/3`, `count_prefix/2`, `delete/2`, or when the trie is garbage collected
+  (previously crashed the VM with SIGBUS).
+- `count_prefix/2` returns the exact count; it was capped at 64.
+- `prefix_search(trie, "")` returns `{:ok, false}` on an empty trie.
+- `auto_complete/3` raises `FunctionClauseError` for a negative `max_results` instead of
+  an `ArgumentError` from the NIF.
+- A panic inside the NIF can no longer leave the trie permanently locked.
+
+### Removed
+
+- `legacy_cpu` precompiled artifact variants and the `TRIE_HARD_USE_LEGACY_ARTIFACTS`
+  environment variable / `:use_legacy_artifacts` config. x86_64 artifacts now target
+  baseline x86-64 and run on every x86_64 CPU; the CPU detection that selected the
+  variant never worked.
+
+### Changed
+
+- Precompiled NIFs are built with a pinned Rust toolchain (`rust-toolchain.toml`,
+  1.97.1); the crate declares MSRV 1.91.
+- macOS artifacts are built on `macos-15` runners (`macos-13` was retired).
+
+## [0.2.7] - 2025-09-23
+
+### Added
+
+- Values may be any Erlang term (atoms, numbers, tuples, maps, lists, PIDs, references,
+  binaries). Strings are stored as-is; other terms are stored in external term format.
+- Precompiled NIFs for NIF version 2.16 alongside 2.15.
+
+## [0.2.6] - 2025-09-23
+
+### Added
+
+- Precompiled NIFs for `aarch64-unknown-linux-musl` and `x86_64-unknown-linux-musl`.
+
+### Changed
+
+- CI caches Rust and Mix dependencies.
+
 ## [0.2.5] - 2025-09-22
 
 ### Fixed

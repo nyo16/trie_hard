@@ -192,7 +192,7 @@ defmodule TrieHard do
   """
   @spec auto_complete(trie(), String.t(), non_neg_integer()) :: {:ok, [String.t()]} | {:error, []}
   def auto_complete(trie, prefix, max_results \\ 10)
-      when is_binary(prefix) and is_integer(max_results) do
+      when is_binary(prefix) and is_integer(max_results) and max_results >= 0 do
     Native.auto_complete(trie, prefix, max_results)
   end
 
@@ -221,7 +221,7 @@ defmodule TrieHard do
   @doc """
   Returns the number of words with a given prefix.
 
-  This is a convenience function that uses auto_complete with unlimited results.
+  Counts every stored key under `prefix`; the result is exact and not capped.
 
   ## Examples
 
@@ -233,11 +233,8 @@ defmodule TrieHard do
       iex> TrieHard.count_prefix(trie, "do")
       {:ok, 1}
   """
-  @spec count_prefix(trie(), String.t()) :: {:ok, non_neg_integer()} | {:error, 0}
+  @spec count_prefix(trie(), String.t()) :: {:ok, non_neg_integer()}
   def count_prefix(trie, prefix) when is_binary(prefix) do
-    case auto_complete(trie, prefix, :erlang.system_info(:wordsize) * 8) do
-      {:ok, results} -> {:ok, length(results)}
-      {:error, _} -> {:error, 0}
-    end
+    {:ok, Native.count_prefix(trie, prefix)}
   end
 end

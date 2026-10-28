@@ -3,6 +3,7 @@ name = "trie_hard_native"
 version = "0.1.0"
 authors = []
 edition = "2021"
+rust-version = "1.91"
 
 [lib]
 name = "trie_hard_native"
@@ -11,6 +12,9 @@ crate-type = ["cdylib"]
 
 [dependencies]
 rustler = "0.37.0"
+
+[dev-dependencies]
+proptest = "1"
 
 [features]
 default = ["nif_version_2_15"]

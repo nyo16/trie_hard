@@ -35,8 +35,8 @@ jobs:
           otp-version: ${{ matrix.pair.otp }}
           elixir-version: ${{ matrix.pair.elixir }}
 
-      - name: Install minimal stable Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
 
       - name: Install Dependencies
         run: mix deps.get
@@ -58,4 +58,8 @@ jobs:
         run: cargo fmt --manifest-path=native/trie_hard_native/Cargo.toml --all -- --check
 
       - name: run clippy
-        run: cargo clippy --manifest-path=native/trie_hard_native/Cargo.toml -- -Dwarnings
+        run: cargo clippy --manifest-path=native/trie_hard_native/Cargo.toml --all-targets -- -Dwarnings
+
+      - name: run cargo test
+        run: cargo test --manifest-path=native/trie_hard_native/Cargo.toml
+        if: ${{ matrix.lint }}

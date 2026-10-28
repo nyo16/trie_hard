@@ -214,6 +214,49 @@ defmodule TrieHardTest do
     end
   end
 
+  describe "regressions" do
+    test "deleting non-ASCII keys works and leaves the trie usable" do
+      trie = TrieHard.new()
+
+      for key <- ["café", "🦀", "e\u0301"] do
+        assert TrieHard.insert(trie, key, key) == :ok
+        assert TrieHard.delete(trie, key) == :ok
+        assert TrieHard.get(trie, key) == {:not_found, nil}
+        assert TrieHard.insert(trie, key, "again") == :ok
+        assert TrieHard.get(trie, key) == {:ok, "again"}
+      end
+    end
+
+    test "count_prefix is exact beyond 64 matches" do
+      trie = TrieHard.new()
+      assert TrieHard.add_word_list(trie, for(i <- 1..1000, do: "word#{i}")) == :ok
+
+      assert TrieHard.count_prefix(trie, "word") == {:ok, 1000}
+      assert TrieHard.count_prefix(trie, "") == {:ok, 1000}
+    end
+
+    test "very deep keys do not overflow the scheduler stack" do
+      trie = TrieHard.new()
+      key = String.duplicate("a", 10_000)
+
+      assert TrieHard.insert(trie, key, 1) == :ok
+      assert TrieHard.auto_complete(trie, "", 1) == {:ok, [key]}
+      assert TrieHard.count_prefix(trie, "a") == {:ok, 1}
+      assert TrieHard.delete(trie, key) == :ok
+      assert TrieHard.get(trie, key) == {:not_found, nil}
+    end
+
+    test "prefix_search on an empty trie is false" do
+      assert TrieHard.prefix_search(TrieHard.new(), "") == {:ok, false}
+    end
+
+    test "auto_complete rejects a negative limit" do
+      assert_raise FunctionClauseError, fn ->
+        TrieHard.auto_complete(TrieHard.new(), "x", -1)
+      end
+    end
+  end
+
   describe "concurrent access" do
     test "multiple processes can access same trie safely" do
       trie = TrieHard.new()
