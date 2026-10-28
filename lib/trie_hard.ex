@@ -49,8 +49,8 @@ defmodule TrieHard do
   ## Examples
 
       iex> trie = TrieHard.new()
-      iex> is_reference(trie)
-      true
+      iex> TrieHard.count_prefix(trie, "")
+      {:ok, 0}
   """
   @spec new() :: trie()
   def new do
@@ -189,8 +189,8 @@ defmodule TrieHard do
   - `max_results` - Maximum number of results to return (default: 10)
 
   ## Returns
-  - `{:ok, [String.t()]}` - List of matching words
-  - `{:error, []}` on internal error
+  - `{:ok, [String.t()]}` - up to `max_results` matching words, in lexicographic
+    (codepoint) order; when there are more matches, the first ones in that order
 
   ## Examples
 
@@ -201,9 +201,10 @@ defmodule TrieHard do
       :ok
       iex> TrieHard.insert(trie, "card", "3")
       :ok
-      iex> {:ok, results} = TrieHard.auto_complete(trie, "ca", 2)
-      iex> length(results) <= 2
-      true
+      iex> TrieHard.auto_complete(trie, "ca", 2)
+      {:ok, ["car", "card"]}
+      iex> TrieHard.auto_complete(trie, "ca")
+      {:ok, ["car", "card", "cat"]}
   """
   @spec auto_complete(trie(), String.t(), non_neg_integer()) :: {:ok, [String.t()]}
   def auto_complete(trie, prefix, max_results \\ 10)
