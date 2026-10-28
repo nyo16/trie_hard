@@ -257,6 +257,75 @@ defmodule TrieHardTest do
     end
   end
 
+  describe "values and bulk loads" do
+    test "get after add_word_list returns the word" do
+      trie = TrieHard.new()
+      assert TrieHard.add_word_list(trie, ["alpha", "beta"]) == :ok
+      assert TrieHard.get(trie, "alpha") == {:ok, "alpha"}
+    end
+
+    test "add_word_list overwrites a prior insert value" do
+      trie = TrieHard.new()
+      assert TrieHard.insert(trie, "alpha", %{v: 1}) == :ok
+      assert TrieHard.add_word_list(trie, ["alpha"]) == :ok
+      assert TrieHard.get(trie, "alpha") == {:ok, "alpha"}
+    end
+
+    test "large values round-trip" do
+      trie = TrieHard.new()
+      big = :binary.copy(<<1, 2, 3, 4>>, 2_500_000)
+      deep = Enum.reduce(1..10_000, :leaf, fn i, acc -> %{i => acc} end)
+
+      assert TrieHard.insert(trie, "big", big) == :ok
+      assert TrieHard.insert(trie, "deep", deep) == :ok
+      assert TrieHard.get(trie, "big") == {:ok, big}
+      assert TrieHard.get(trie, "deep") == {:ok, deep}
+    end
+
+    test "keys longer than the fast-path limit work" do
+      trie = TrieHard.new()
+      key = String.duplicate("k", 5_000)
+
+      assert TrieHard.insert(trie, key, :v) == :ok
+      assert TrieHard.get(trie, key) == {:ok, :v}
+      assert TrieHard.prefix_search(trie, key) == {:ok, true}
+      assert TrieHard.count_prefix(trie, key) == {:ok, 1}
+      assert TrieHard.auto_complete(trie, key, 5) == {:ok, [key]}
+      assert TrieHard.delete(trie, key) == :ok
+      assert TrieHard.get(trie, key) == {:not_found, nil}
+    end
+
+    test "readers complete while a writer bulk-loads" do
+      trie = TrieHard.new()
+      assert TrieHard.insert(trie, "shared", :data) == :ok
+      words = for i <- 1..200_000, do: "w#{i}"
+
+      writer = Task.async(fn -> TrieHard.add_word_list(trie, words) end)
+
+      readers =
+        1..50
+        |> Task.async_stream(
+          fn i ->
+            for _ <- 1..20 do
+              {:ok, :data} = TrieHard.get(trie, "shared")
+              {:ok, found} = TrieHard.auto_complete(trie, "w#{i}", 5)
+              true = Enum.all?(found, &String.starts_with?(&1, "w#{i}"))
+            end
+
+            :done
+          end,
+          max_concurrency: 50,
+          timeout: 30_000
+        )
+        |> Enum.to_list()
+
+      assert Task.await(writer, 30_000) == :ok
+      assert readers == List.duplicate({:ok, :done}, 50)
+      assert TrieHard.count_prefix(trie, "w") == {:ok, 200_000}
+      assert TrieHard.get(trie, "w200000") == {:ok, "w200000"}
+    end
+  end
+
   describe "concurrent access" do
     test "multiple processes can access same trie safely" do
       trie = TrieHard.new()

@@ -26,6 +26,12 @@ defmodule TrieHard do
       iex> {:ok, results} = TrieHard.auto_complete(trie, "ca", 10)
       iex> Enum.sort(results)
       ["car", "card", "cat"]
+
+  ## Memory
+
+  A trie lives in native memory owned by its reference. It is freed when the last
+  reference is garbage collected, on whichever scheduler thread runs that GC;
+  freeing a trie with millions of keys takes correspondingly long on that thread.
   """
 
   alias TrieHard.Native
@@ -33,6 +39,9 @@ defmodule TrieHard do
   @type trie :: reference()
   @type key :: String.t()
   @type value :: term()
+
+  # Words per add_word_list NIF call; bounds how long the write lock is held.
+  @word_list_chunk 1_000
 
   @doc """
   Creates a new empty Trie.
@@ -66,9 +75,13 @@ defmodule TrieHard do
       iex> TrieHard.insert(trie, "data", {:ok, [1, 2, 3]})
       :ok
   """
-  @spec insert(trie(), key(), value()) :: :ok | :error
+  @spec insert(trie(), key(), value()) :: :ok
   def insert(trie, key, value) when is_binary(key) do
-    Native.insert(trie, key, value)
+    etf = :erlang.term_to_binary(value)
+
+    trie
+    |> Native.insert(key, etf)
+    |> fast_or_dirty(fn -> Native.insert_dirty(trie, key, etf) end)
   end
 
   @doc """
@@ -97,22 +110,15 @@ defmodule TrieHard do
       iex> TrieHard.get(trie, "missing")
       {:not_found, nil}
   """
-  @spec get(trie(), key()) :: {:ok, value()} | {:not_found, nil} | {:error, nil}
+  @spec get(trie(), key()) :: {:ok, value()} | {:not_found, nil}
   def get(trie, key) when is_binary(key) do
-    case Native.get(trie, key) do
-      {:ok, value} when is_binary(value) ->
-        # Try to decode if it's an Erlang external term format
-        try do
-          decoded = :erlang.binary_to_term(value)
-          {:ok, decoded}
-        rescue
-          ArgumentError ->
-            # If decoding fails, it's just a binary value
-            {:ok, value}
-        end
-
-      other ->
-        other
+    trie
+    |> Native.get(key)
+    |> fast_or_dirty(fn -> Native.get_dirty(trie, key) end)
+    |> case do
+      {:ok, etf} -> {:ok, :erlang.binary_to_term(etf, [:safe])}
+      :self_key -> {:ok, key}
+      :not_found -> {:not_found, nil}
     end
   end
 
@@ -133,9 +139,13 @@ defmodule TrieHard do
       iex> TrieHard.get(trie, "hello")
       {:not_found, nil}
   """
-  @spec delete(trie(), key()) :: :ok | :error
+  @spec delete(trie(), key()) :: :ok
   def delete(trie, key) when is_binary(key) do
-    Native.delete(trie, key)
+    trie
+    |> Native.delete(key)
+    |> fast_or_dirty(fn -> Native.delete_dirty(trie, key) end)
+
+    :ok
   end
 
   @doc """
@@ -160,9 +170,14 @@ defmodule TrieHard do
       iex> TrieHard.prefix_search(trie, "dog")
       {:ok, false}
   """
-  @spec prefix_search(trie(), String.t()) :: {:ok, boolean()} | {:error, false}
+  @spec prefix_search(trie(), String.t()) :: {:ok, boolean()}
   def prefix_search(trie, prefix) when is_binary(prefix) do
-    Native.prefix_search(trie, prefix)
+    found =
+      trie
+      |> Native.prefix_search(prefix)
+      |> fast_or_dirty(fn -> Native.prefix_search_dirty(trie, prefix) end)
+
+    {:ok, found}
   end
 
   @doc """
@@ -190,16 +205,24 @@ defmodule TrieHard do
       iex> length(results) <= 2
       true
   """
-  @spec auto_complete(trie(), String.t(), non_neg_integer()) :: {:ok, [String.t()]} | {:error, []}
+  @spec auto_complete(trie(), String.t(), non_neg_integer()) :: {:ok, [String.t()]}
   def auto_complete(trie, prefix, max_results \\ 10)
       when is_binary(prefix) and is_integer(max_results) and max_results >= 0 do
-    Native.auto_complete(trie, prefix, max_results)
+    words =
+      trie
+      |> Native.auto_complete(prefix, max_results)
+      |> fast_or_dirty(fn -> Native.auto_complete_dirty(trie, prefix, max_results) end)
+
+    {:ok, words}
   end
 
   @doc """
   Efficiently inserts multiple words at once.
 
-  Each word will be inserted with itself as the value.
+  Each word will be inserted with itself as the value. Words are sent to the NIF in
+  chunks of #{@word_list_chunk} so the write lock is never held for long; readers
+  interleave between chunks. The operation is not atomic: if an element is not a
+  UTF-8 binary, `ArgumentError` is raised and the chunks before it stay inserted.
 
   ## Parameters
   - `trie` - The trie reference
@@ -213,9 +236,11 @@ defmodule TrieHard do
       iex> TrieHard.get(trie, "cat")
       {:ok, "cat"}
   """
-  @spec add_word_list(trie(), [String.t()]) :: :ok | :error
+  @spec add_word_list(trie(), [String.t()]) :: :ok
   def add_word_list(trie, words) when is_list(words) do
-    Native.add_word_list(trie, words)
+    words
+    |> Stream.chunk_every(@word_list_chunk)
+    |> Enum.each(&Native.add_word_list(trie, &1))
   end
 
   @doc """
@@ -235,6 +260,17 @@ defmodule TrieHard do
   """
   @spec count_prefix(trie(), String.t()) :: {:ok, non_neg_integer()}
   def count_prefix(trie, prefix) when is_binary(prefix) do
-    {:ok, Native.count_prefix(trie, prefix)}
+    count =
+      trie
+      |> Native.count_prefix(prefix)
+      |> fast_or_dirty(fn -> Native.count_prefix_dirty(trie, prefix) end)
+
+    {:ok, count}
   end
+
+  # Fast NIFs run on the calling (normal) scheduler and return `:dirty` instead of
+  # blocking on a contended lock or doing unbounded work; the twin runs on a dirty
+  # CPU scheduler.
+  defp fast_or_dirty(:dirty, dirty_fun), do: dirty_fun.()
+  defp fast_or_dirty(result, _dirty_fun), do: result
 end

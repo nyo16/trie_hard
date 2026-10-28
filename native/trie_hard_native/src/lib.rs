@@ -1,124 +1,278 @@
-use rustler::{Atom, Binary, Encoder, Env, NewBinary, ResourceArc, Term};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use rustler::{Binary, Encoder, Env, NewBinary, ResourceArc, Term};
+use std::sync::{PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError};
 
 mod trie;
-use trie::Trie;
+mod value;
+
+use trie::{OverBudget, Trie};
+use value::Value;
 
 mod atoms {
     rustler::atoms! {
         ok,
         not_found,
+        self_key,
+        dirty,
     }
 }
 
-#[derive(Debug, Clone)]
-enum HybridValue {
-    String(String),  // Zero-overhead for strings
-    Binary(Vec<u8>), // Binary-encoded for other terms
+/// Fast NIFs hand keys/prefixes longer than this to their dirty twin.
+const FAST_MAX_KEY_BYTES: usize = 4 * 1024;
+/// Fast NIFs hand values larger than this (copy cost) to their dirty twin.
+const FAST_MAX_VALUE_BYTES: usize = 64 * 1024;
+/// Node visits a fast traversal may make before handing off to its dirty twin.
+const FAST_NODE_BUDGET: usize = 10_000;
+
+/// How a NIF may wait for the trie lock.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// Normal scheduler: never block; return `:dirty` when contended or over budget.
+    Fast,
+    /// Dirty CPU scheduler: block on the lock, no budget.
+    Blocking,
 }
 
-pub struct TrieResource {
-    trie: Mutex<Trie<HybridValue>>,
-}
-
-impl TrieResource {
-    fn new() -> Self {
-        TrieResource {
-            trie: Mutex::new(Trie::new()),
+impl Mode {
+    fn budget(self) -> usize {
+        match self {
+            Mode::Fast => FAST_NODE_BUDGET,
+            Mode::Blocking => usize::MAX,
         }
     }
 
-    /// A panic while holding the lock must not brick the trie forever: every
-    /// mutation leaves the structure consistent, so the poisoned guard is safe.
-    fn lock(&self) -> MutexGuard<'_, Trie<HybridValue>> {
-        self.trie.lock().unwrap_or_else(PoisonError::into_inner)
+    fn too_large(self, bytes: usize, limit: usize) -> bool {
+        self == Mode::Fast && bytes > limit
     }
+}
+
+pub struct TrieResource {
+    trie: RwLock<Trie<Value>>,
+}
+
+#[rustler::resource_impl]
+impl rustler::Resource for TrieResource {}
+
+/// A panic while holding the lock must not brick the trie forever: every
+/// mutation leaves the structure consistent, so a poisoned guard is safe.
+impl TrieResource {
+    fn read(&self, mode: Mode) -> Option<RwLockReadGuard<'_, Trie<Value>>> {
+        match mode {
+            Mode::Blocking => Some(self.trie.read().unwrap_or_else(PoisonError::into_inner)),
+            Mode::Fast => match self.trie.try_read() {
+                Ok(guard) => Some(guard),
+                Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+                Err(TryLockError::WouldBlock) => None,
+            },
+        }
+    }
+
+    fn write(&self, mode: Mode) -> Option<RwLockWriteGuard<'_, Trie<Value>>> {
+        match mode {
+            Mode::Blocking => Some(self.trie.write().unwrap_or_else(PoisonError::into_inner)),
+            Mode::Fast => match self.trie.try_write() {
+                Ok(guard) => Some(guard),
+                Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+                Err(TryLockError::WouldBlock) => None,
+            },
+        }
+    }
+}
+
+fn dirty(env: Env<'_>) -> Term<'_> {
+    atoms::dirty().encode(env)
 }
 
 #[rustler::nif]
 fn new_trie() -> ResourceArc<TrieResource> {
-    ResourceArc::new(TrieResource::new())
+    ResourceArc::new(TrieResource {
+        trie: RwLock::new(Trie::new()),
+    })
 }
 
-#[rustler::nif]
-fn insert(trie_resource: ResourceArc<TrieResource>, key: String, value: Term) -> Atom {
-    let hybrid_value = if let Ok(string_value) = value.decode::<String>() {
-        // Zero-overhead path for strings
-        HybridValue::String(string_value)
-    } else {
-        // Binary encode other terms using Erlang's external term format
-        let owned_binary = value.to_binary();
-        HybridValue::Binary(owned_binary.as_slice().to_vec())
-    };
-
-    trie_resource.lock().insert(&key, hybrid_value);
-    atoms::ok()
-}
-
-#[rustler::nif]
-fn get(env: Env, trie_resource: ResourceArc<TrieResource>, key: String) -> (Atom, Option<Term>) {
-    match trie_resource.lock().get(&key) {
-        Some(hybrid_value) => {
-            let term = match hybrid_value {
-                HybridValue::String(s) => s.encode(env),
-                HybridValue::Binary(binary_data) => {
-                    let mut new_binary = NewBinary::new(env, binary_data.len());
-                    new_binary.as_mut_slice().copy_from_slice(binary_data);
-                    let binary: Binary = new_binary.into();
-                    binary.to_term(env)
-                }
-            };
-            (atoms::ok(), Some(term))
+fn insert_impl<'a>(
+    env: Env<'a>,
+    trie: &TrieResource,
+    key: &str,
+    etf: Binary,
+    mode: Mode,
+) -> Term<'a> {
+    if mode.too_large(key.len(), FAST_MAX_KEY_BYTES)
+        || mode.too_large(etf.len(), FAST_MAX_VALUE_BYTES)
+    {
+        return dirty(env);
+    }
+    let value = Value::Etf(etf.as_slice().into());
+    match trie.write(mode) {
+        Some(mut guard) => {
+            guard.insert(key, value);
+            atoms::ok().encode(env)
         }
-        None => (atoms::not_found(), None),
+        None => dirty(env),
     }
 }
 
 #[rustler::nif]
-fn delete(trie_resource: ResourceArc<TrieResource>, key: String) -> Atom {
-    trie_resource.lock().delete(&key);
-    atoms::ok()
+fn insert<'a>(env: Env<'a>, trie: ResourceArc<TrieResource>, key: &str, etf: Binary) -> Term<'a> {
+    insert_impl(env, &trie, key, etf, Mode::Fast)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn insert_dirty<'a>(
+    env: Env<'a>,
+    trie: ResourceArc<TrieResource>,
+    key: &str,
+    etf: Binary,
+) -> Term<'a> {
+    insert_impl(env, &trie, key, etf, Mode::Blocking)
+}
+
+/// Returns `{:ok, etf}`, `:self_key`, `:not_found`, or `:dirty`.
+fn get_impl<'a>(env: Env<'a>, trie: &TrieResource, key: &str, mode: Mode) -> Term<'a> {
+    if mode.too_large(key.len(), FAST_MAX_KEY_BYTES) {
+        return dirty(env);
+    }
+    // Clone the Arc under the read lock; copy the bytes after releasing it.
+    let value = match trie.read(mode) {
+        Some(guard) => guard.get(key).cloned(),
+        None => return dirty(env),
+    };
+    match value {
+        None => atoms::not_found().encode(env),
+        Some(Value::SelfKey) => atoms::self_key().encode(env),
+        Some(Value::Etf(bytes)) if mode.too_large(bytes.len(), FAST_MAX_VALUE_BYTES) => dirty(env),
+        Some(Value::Etf(bytes)) => {
+            let mut binary = NewBinary::new(env, bytes.len());
+            binary.as_mut_slice().copy_from_slice(&bytes);
+            (atoms::ok(), Binary::from(binary)).encode(env)
+        }
+    }
 }
 
 #[rustler::nif]
-fn prefix_search(trie_resource: ResourceArc<TrieResource>, prefix: String) -> (Atom, bool) {
-    (atoms::ok(), trie_resource.lock().prefix_search(&prefix))
+fn get<'a>(env: Env<'a>, trie: ResourceArc<TrieResource>, key: &str) -> Term<'a> {
+    get_impl(env, &trie, key, Mode::Fast)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn get_dirty<'a>(env: Env<'a>, trie: ResourceArc<TrieResource>, key: &str) -> Term<'a> {
+    get_impl(env, &trie, key, Mode::Blocking)
+}
+
+/// Returns whether the key existed, or `:dirty`.
+fn delete_impl<'a>(env: Env<'a>, trie: &TrieResource, key: &str, mode: Mode) -> Term<'a> {
+    if mode.too_large(key.len(), FAST_MAX_KEY_BYTES) {
+        return dirty(env);
+    }
+    match trie.write(mode) {
+        Some(mut guard) => guard.delete(key).encode(env),
+        None => dirty(env),
+    }
 }
 
 #[rustler::nif]
-fn auto_complete(
-    trie_resource: ResourceArc<TrieResource>,
-    prefix: String,
+fn delete<'a>(env: Env<'a>, trie: ResourceArc<TrieResource>, key: &str) -> Term<'a> {
+    delete_impl(env, &trie, key, Mode::Fast)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn delete_dirty<'a>(env: Env<'a>, trie: ResourceArc<TrieResource>, key: &str) -> Term<'a> {
+    delete_impl(env, &trie, key, Mode::Blocking)
+}
+
+fn prefix_search_impl<'a>(env: Env<'a>, trie: &TrieResource, prefix: &str, mode: Mode) -> Term<'a> {
+    if mode.too_large(prefix.len(), FAST_MAX_KEY_BYTES) {
+        return dirty(env);
+    }
+    match trie.read(mode) {
+        Some(guard) => guard.prefix_search(prefix).encode(env),
+        None => dirty(env),
+    }
+}
+
+#[rustler::nif]
+fn prefix_search<'a>(env: Env<'a>, trie: ResourceArc<TrieResource>, prefix: &str) -> Term<'a> {
+    prefix_search_impl(env, &trie, prefix, Mode::Fast)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn prefix_search_dirty<'a>(
+    env: Env<'a>,
+    trie: ResourceArc<TrieResource>,
+    prefix: &str,
+) -> Term<'a> {
+    prefix_search_impl(env, &trie, prefix, Mode::Blocking)
+}
+
+fn auto_complete_impl<'a>(
+    env: Env<'a>,
+    trie: &TrieResource,
+    prefix: &str,
     max_results: usize,
-) -> (Atom, Vec<String>) {
-    let results = trie_resource.lock().auto_complete(&prefix, max_results);
-    (atoms::ok(), results)
+    mode: Mode,
+) -> Term<'a> {
+    if mode.too_large(prefix.len(), FAST_MAX_KEY_BYTES) {
+        return dirty(env);
+    }
+    let results = match trie.read(mode) {
+        Some(guard) => guard.auto_complete(prefix, max_results, mode.budget()),
+        None => return dirty(env),
+    };
+    match results {
+        Ok(words) => words.encode(env),
+        Err(OverBudget) => dirty(env),
+    }
 }
 
 #[rustler::nif]
-fn count_prefix(trie_resource: ResourceArc<TrieResource>, prefix: String) -> usize {
-    trie_resource.lock().count_prefix(&prefix)
+fn auto_complete<'a>(
+    env: Env<'a>,
+    trie: ResourceArc<TrieResource>,
+    prefix: &str,
+    max_results: usize,
+) -> Term<'a> {
+    auto_complete_impl(env, &trie, prefix, max_results, Mode::Fast)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn auto_complete_dirty<'a>(
+    env: Env<'a>,
+    trie: ResourceArc<TrieResource>,
+    prefix: &str,
+    max_results: usize,
+) -> Term<'a> {
+    auto_complete_impl(env, &trie, prefix, max_results, Mode::Blocking)
+}
+
+fn count_prefix_impl<'a>(env: Env<'a>, trie: &TrieResource, prefix: &str, mode: Mode) -> Term<'a> {
+    if mode.too_large(prefix.len(), FAST_MAX_KEY_BYTES) {
+        return dirty(env);
+    }
+    let count = match trie.read(mode) {
+        Some(guard) => guard.count_prefix(prefix, mode.budget()),
+        None => return dirty(env),
+    };
+    match count {
+        Ok(count) => count.encode(env),
+        Err(OverBudget) => dirty(env),
+    }
 }
 
 #[rustler::nif]
-#[allow(unused_variables)]
-fn add_word_list(env: Env, trie_resource: ResourceArc<TrieResource>, words: Vec<String>) -> Atom {
-    let word_refs: Vec<&str> = words.iter().map(|s| s.as_str()).collect();
-    trie_resource.lock().add_word_list(&word_refs, |word| {
-        // For backward compatibility, we store the word as a string (zero overhead)
-        HybridValue::String(word.to_string())
-    });
+fn count_prefix<'a>(env: Env<'a>, trie: ResourceArc<TrieResource>, prefix: &str) -> Term<'a> {
+    count_prefix_impl(env, &trie, prefix, Mode::Fast)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn count_prefix_dirty<'a>(env: Env<'a>, trie: ResourceArc<TrieResource>, prefix: &str) -> Term<'a> {
+    count_prefix_impl(env, &trie, prefix, Mode::Blocking)
+}
+
+/// Always dirty: the Elixir side chunks the list to bound the write-lock hold.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn add_word_list(trie: ResourceArc<TrieResource>, words: Vec<&str>) -> rustler::Atom {
+    let mut guard = trie.trie.write().unwrap_or_else(PoisonError::into_inner);
+    guard.add_word_list(&words, |_| Value::SelfKey);
     atoms::ok()
 }
 
-#[allow(non_local_definitions)]
-fn load(env: Env, _info: Term) -> bool {
-    let _ = rustler::resource!(TrieResource, env);
-    true
-}
-
-rustler::init!(
-    "Elixir.TrieHard.Native",
-    load = load,
-    resources = [TrieResource]
-);
+rustler::init!("Elixir.TrieHard.Native");

@@ -56,6 +56,10 @@ impl<T> Drop for TrieNode<T> {
     }
 }
 
+/// A traversal exceeded its node-visit budget; retry with a larger one.
+#[derive(Debug, PartialEq, Eq)]
+pub struct OverBudget;
+
 pub struct Trie<T> {
     root: TrieNode<T>,
 }
@@ -139,18 +143,26 @@ impl<T> Trie<T> {
             .is_some_and(|node| node.value.is_some() || node.child_count() > 0)
     }
 
-    pub fn auto_complete(&self, prefix: &str, max_results: usize) -> Vec<String> {
+    /// Up to `max_results` stored keys starting with `prefix`.
+    /// Visits at most `budget` nodes below the prefix, else `Err(OverBudget)`.
+    pub fn auto_complete(
+        &self,
+        prefix: &str,
+        max_results: usize,
+        mut budget: usize,
+    ) -> Result<Vec<String>, OverBudget> {
         let mut results = Vec::new();
         if max_results == 0 {
-            return results;
+            return Ok(results);
         }
         let Some(start) = self.find(prefix) else {
-            return results;
+            return Ok(results);
         };
 
         let mut buf = String::from(prefix);
         let mut stack: Vec<(&TrieNode<T>, usize, Option<char>)> = vec![(start, buf.len(), None)];
         while let Some((node, buf_len, ch)) = stack.pop() {
+            budget = budget.checked_sub(1).ok_or(OverBudget)?;
             buf.truncate(buf_len);
             if let Some(ch) = ch {
                 buf.push(ch);
@@ -167,23 +179,25 @@ impl<T> Trie<T> {
                     .map(|(ch, child)| (child, len, Some(ch))),
             );
         }
-        results
+        Ok(results)
     }
 
     /// Number of stored keys starting with `prefix`.
-    pub fn count_prefix(&self, prefix: &str) -> usize {
+    /// Visits at most `budget` nodes below the prefix, else `Err(OverBudget)`.
+    pub fn count_prefix(&self, prefix: &str, mut budget: usize) -> Result<usize, OverBudget> {
         let Some(start) = self.find(prefix) else {
-            return 0;
+            return Ok(0);
         };
         let mut count = 0;
         let mut stack = vec![start];
         while let Some(node) = stack.pop() {
+            budget = budget.checked_sub(1).ok_or(OverBudget)?;
             if node.value.is_some() {
                 count += 1;
             }
             stack.extend(node.children_iter().map(|(_, child)| child));
         }
-        count
+        Ok(count)
     }
 
     pub fn add_word_list<F>(&mut self, words: &[&str], value_mapper: F)
@@ -202,6 +216,8 @@ mod tests {
     use proptest::prelude::*;
     use std::collections::{BTreeMap, BTreeSet};
     use std::ops::Bound;
+
+    const UNLIMITED: usize = usize::MAX;
 
     impl<T> Trie<T> {
         fn node_count(&self) -> usize {
@@ -277,8 +293,8 @@ mod tests {
         let key = "a".repeat(100_000);
         let mut trie = Trie::new();
         trie.insert(&key, 1);
-        assert_eq!(trie.auto_complete("", 1), vec![key.clone()]);
-        assert_eq!(trie.count_prefix("a"), 1);
+        assert_eq!(trie.auto_complete("", 1, UNLIMITED), Ok(vec![key.clone()]));
+        assert_eq!(trie.count_prefix("a", UNLIMITED), Ok(1));
         assert!(trie.delete(&key));
         assert_eq!(trie.node_count(), 1);
 
@@ -292,10 +308,24 @@ mod tests {
         for i in 0..1000 {
             trie.insert(&format!("w{i}"), ());
         }
-        assert_eq!(trie.count_prefix(""), 1000);
-        assert_eq!(trie.count_prefix("w"), 1000);
-        assert_eq!(trie.count_prefix("w1"), 111);
-        assert_eq!(trie.count_prefix("x"), 0);
+        assert_eq!(trie.count_prefix("", UNLIMITED), Ok(1000));
+        assert_eq!(trie.count_prefix("w", UNLIMITED), Ok(1000));
+        assert_eq!(trie.count_prefix("w1", UNLIMITED), Ok(111));
+        assert_eq!(trie.count_prefix("x", UNLIMITED), Ok(0));
+    }
+
+    #[test]
+    fn traversals_stop_at_budget() {
+        let mut trie = Trie::new();
+        for key in ["a", "ab", "abc"] {
+            trie.insert(key, ());
+        }
+        // Nodes under "": root, a, ab, abc.
+        assert_eq!(trie.count_prefix("", 4), Ok(3));
+        assert_eq!(trie.count_prefix("", 3), Err(OverBudget));
+        assert_eq!(trie.auto_complete("", 10, 3), Err(OverBudget));
+        assert_eq!(trie.auto_complete("", 1, 2), Ok(vec!["a".to_string()]));
+        assert_eq!(trie.count_prefix("x", 0), Ok(0));
     }
 
     #[test]
@@ -317,14 +347,18 @@ mod tests {
         for key in ["car", "card", "care", "cat", "dog"] {
             trie.insert(key, ());
         }
-        assert!(trie.auto_complete("ca", 0).is_empty());
-        assert_eq!(trie.auto_complete("ca", 2).len(), 2);
-        let all: BTreeSet<_> = trie.auto_complete("ca", 10).into_iter().collect();
+        assert_eq!(trie.auto_complete("ca", 0, UNLIMITED), Ok(vec![]));
+        assert_eq!(trie.auto_complete("ca", 2, UNLIMITED).unwrap().len(), 2);
+        let all: BTreeSet<_> = trie
+            .auto_complete("ca", 10, UNLIMITED)
+            .unwrap()
+            .into_iter()
+            .collect();
         assert_eq!(
             all,
             BTreeSet::from(["car", "card", "care", "cat"].map(String::from))
         );
-        assert!(trie.auto_complete("x", 10).is_empty());
+        assert_eq!(trie.auto_complete("x", 10, UNLIMITED), Ok(vec![]));
     }
 
     #[derive(Debug, Clone)]
@@ -377,11 +411,11 @@ mod tests {
                     Op::Get(k) => prop_assert_eq!(trie.get(&k), model.get(&k)),
                     Op::Count(p) => {
                         let expected = with_prefix(&model, &p).count();
-                        prop_assert_eq!(trie.count_prefix(&p), expected);
+                        prop_assert_eq!(trie.count_prefix(&p, UNLIMITED), Ok(expected));
                         prop_assert_eq!(trie.prefix_search(&p), expected > 0);
                     }
                     Op::Complete(p, n) => {
-                        let got = trie.auto_complete(&p, n);
+                        let got = trie.auto_complete(&p, n, UNLIMITED).unwrap();
                         let expected: BTreeSet<&String> = with_prefix(&model, &p).collect();
                         prop_assert_eq!(got.len(), n.min(expected.len()));
                         let unique: BTreeSet<&String> = got.iter().collect();
