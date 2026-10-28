@@ -1,10 +1,10 @@
 use rustler::{Binary, Encoder, Env, NewBinary, ResourceArc, Term};
 use std::sync::{PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError};
 
-mod trie;
+mod sorted;
 mod value;
 
-use trie::{OverBudget, Trie};
+use sorted::{OverBudget, SortedTrie as Trie};
 use value::Value;
 
 mod atoms {
@@ -82,6 +82,20 @@ fn dirty(env: Env<'_>) -> Term<'_> {
     atoms::dirty().encode(env)
 }
 
+/// Completions are valid UTF-8 by construction (prefixes of `&str` keys
+/// extended to full keys), so they are emitted as binaries without re-checking.
+fn encode_words<'a>(env: Env<'a>, words: &[Vec<u8>]) -> Term<'a> {
+    let terms: Vec<Term<'a>> = words
+        .iter()
+        .map(|word| {
+            let mut binary = NewBinary::new(env, word.len());
+            binary.as_mut_slice().copy_from_slice(word);
+            Binary::from(binary).to_term(env)
+        })
+        .collect();
+    terms.encode(env)
+}
+
 #[rustler::nif]
 fn new_trie() -> ResourceArc<TrieResource> {
     ResourceArc::new(TrieResource {
@@ -104,7 +118,7 @@ fn insert_impl<'a>(
     let value = Value::Etf(etf.as_slice().into());
     match trie.write(mode) {
         Some(mut guard) => {
-            guard.insert(key, value);
+            guard.insert(key.as_bytes(), value);
             atoms::ok().encode(env)
         }
         None => dirty(env),
@@ -133,7 +147,7 @@ fn get_impl<'a>(env: Env<'a>, trie: &TrieResource, key: &str, mode: Mode) -> Ter
     }
     // Clone the Arc under the read lock; copy the bytes after releasing it.
     let value = match trie.read(mode) {
-        Some(guard) => guard.get(key).cloned(),
+        Some(guard) => guard.get(key.as_bytes()).cloned(),
         None => return dirty(env),
     };
     match value {
@@ -164,7 +178,7 @@ fn delete_impl<'a>(env: Env<'a>, trie: &TrieResource, key: &str, mode: Mode) -> 
         return dirty(env);
     }
     match trie.write(mode) {
-        Some(mut guard) => guard.delete(key).encode(env),
+        Some(mut guard) => guard.delete(key.as_bytes()).encode(env),
         None => dirty(env),
     }
 }
@@ -184,7 +198,7 @@ fn prefix_search_impl<'a>(env: Env<'a>, trie: &TrieResource, prefix: &str, mode:
         return dirty(env);
     }
     match trie.read(mode) {
-        Some(guard) => guard.prefix_search(prefix).encode(env),
+        Some(guard) => guard.has_prefix(prefix.as_bytes()).encode(env),
         None => dirty(env),
     }
 }
@@ -214,11 +228,11 @@ fn auto_complete_impl<'a>(
         return dirty(env);
     }
     let results = match trie.read(mode) {
-        Some(guard) => guard.auto_complete(prefix, max_results, mode.budget()),
+        Some(guard) => guard.complete(prefix.as_bytes(), max_results, mode.budget()),
         None => return dirty(env),
     };
     match results {
-        Ok(words) => words.encode(env),
+        Ok(words) => encode_words(env, &words),
         Err(OverBudget) => dirty(env),
     }
 }
@@ -248,7 +262,7 @@ fn count_prefix_impl<'a>(env: Env<'a>, trie: &TrieResource, prefix: &str, mode: 
         return dirty(env);
     }
     let count = match trie.read(mode) {
-        Some(guard) => guard.count_prefix(prefix, mode.budget()),
+        Some(guard) => guard.count(prefix.as_bytes(), mode.budget()),
         None => return dirty(env),
     };
     match count {
@@ -271,7 +285,9 @@ fn count_prefix_dirty<'a>(env: Env<'a>, trie: ResourceArc<TrieResource>, prefix:
 #[rustler::nif(schedule = "DirtyCpu")]
 fn add_word_list(trie: ResourceArc<TrieResource>, words: Vec<&str>) -> rustler::Atom {
     let mut guard = trie.trie.write().unwrap_or_else(PoisonError::into_inner);
-    guard.add_word_list(&words, |_| Value::SelfKey);
+    for word in words {
+        guard.insert(word.as_bytes(), Value::SelfKey);
+    }
     atoms::ok()
 }
 

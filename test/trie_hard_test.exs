@@ -82,11 +82,20 @@ defmodule TrieHardTest do
       end)
     end
 
-    test "auto complete respects max results limit", %{trie: trie} do
-      {:ok, results} = TrieHard.auto_complete(trie, "ca", 2)
+    test "auto complete returns the first matches in lexicographic order", %{trie: trie} do
+      assert TrieHard.auto_complete(trie, "ca", 2) == {:ok, ["car", "card"]}
+    end
 
-      assert is_list(results)
-      assert length(results) <= 2
+    test "auto complete order does not depend on insertion order" do
+      words = ["cat", "car", "card", "care", "café", "dog", "ca"]
+      forward = TrieHard.new()
+      backward = TrieHard.new()
+      Enum.each(words, &TrieHard.insert(forward, &1, 1))
+      words |> Enum.reverse() |> Enum.each(&TrieHard.insert(backward, &1, 1))
+
+      expected = {:ok, ["ca", "café", "car", "card", "care", "cat"]}
+      assert TrieHard.auto_complete(forward, "ca", 10) == expected
+      assert TrieHard.auto_complete(backward, "ca", 10) == expected
     end
 
     test "auto complete with empty prefix", %{trie: trie} do
