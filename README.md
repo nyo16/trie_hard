@@ -1,184 +1,148 @@
 # TrieHard
 
-A blazing fast, memory-efficient Trie (prefix tree) implementation for Elixir with autocomplete support, powered by the high-performance `trie_hard_rs` Rust library via Rustler.
+A fast, memory-efficient trie (prefix tree) for Elixir with autocomplete, implemented as a Rust NIF via Rustler.
 
 ## Features
 
-- **🚀 Blazing Fast**: Sub-microsecond autocomplete performance (155μs for 100 results)
-- **💾 Memory Efficient**: Shared prefix storage minimizes memory usage
-- **🌐 Unicode Support**: Full UTF-8 character support including emojis
-- **🔄 Thread-Safe**: Concurrent access support with Rust's safety guarantees
-- **📦 Batch Operations**: Efficient bulk insertions (0.586μs per word)
-- **🔍 Rich API**: Insert, lookup, delete, prefix search, autocomplete, and counting
+- **Fast**: sub-microsecond lookups and prefix checks; ~1 µs for 10 autocomplete results
+- **Compact**: shared prefixes, sorted byte-array children (~760 bytes per key in the benchmark below)
+- **Deterministic**: `auto_complete` returns keys in lexicographic (codepoint) order
+- **Unicode**: keys are UTF-8 strings, including emoji and combining characters
+- **Any value**: store any Erlang term
+- **Scheduler-friendly**: concurrent readers; long or contended operations move to dirty schedulers
 
 ## Performance
 
-Based on benchmarks with 10,000 words:
+Measured with `bench/trie_bench.exs` (release build) on an Apple M4 Max, macOS, Elixir 1.20.0 / OTP 29.1.1,
+against a trie of 100,000 `"word_<n>_suffix"` keys:
 
-- **Insert**: 0.66μs per word (individual), 0.59μs per word (batch)
-- **Lookup**: 2μs
-- **Autocomplete**: 155μs for 100 results
-- **Prefix Search**: 4μs
+| Operation | Time |
+|---|---|
+| `get/2` (hit) | 0.12 µs |
+| `prefix_search/2` | 0.10 µs |
+| `auto_complete/3`, 10 results | 0.90 µs |
+| `auto_complete/3`, 100 results | 6.2 µs |
+| `count_prefix/2`, 111 matches | 1.0 µs |
+| `count_prefix/2`, 11,112 matches | 164 µs |
+| `insert/3`, per key | 0.39 µs |
+| `add_word_list/2`, per key | 0.38 µs |
+
+Memory: ~760 bytes per key (RSS delta for 200,000 keys).
+
+Run it yourself:
+
+```bash
+MIX_ENV=bench TRIE_HARD_BUILD=true mix run bench/trie_bench.exs
+```
 
 ## Installation
-
-Add `trie_hard` to your list of dependencies in `mix.exs`:
 
 ```elixir
 def deps do
   [
-    {:trie_hard, "~> 0.2.0"}
+    {:trie_hard, "~> 0.2.9"}
   ]
 end
 ```
 
-Documentation can be found at [https://hexdocs.pm/trie_hard](https://hexdocs.pm/trie_hard).
+Precompiled NIFs are downloaded for these targets: `aarch64-apple-darwin`, `x86_64-apple-darwin`,
+`aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-musl`,
+`x86_64-unknown-linux-musl`, `x86_64-pc-windows-gnu` (NIF versions 2.16 and 2.17).
+On any other target, set `TRIE_HARD_BUILD=true` to compile the NIF from the bundled sources;
+this needs Rust 1.91 or newer and the optional `{:rustler, "~> 0.37"}` dependency in your project.
+
+Documentation: [https://hexdocs.pm/trie_hard](https://hexdocs.pm/trie_hard).
 
 ## Requirements
 
-- Rust nightly toolchain (for edition 2024 support)
-- Elixir 1.18+
+- Elixir 1.18+ (CI covers OTP 26 through 29)
+- Building from source only: stable Rust ≥ 1.91 (the repository pins 1.97.1 in `rust-toolchain.toml`)
 
 ## Quick Start
 
 ```elixir
-# Create a new trie
 trie = TrieHard.new()
 
-# Insert key-value pairs
-TrieHard.insert(trie, "cat", "feline")
-TrieHard.insert(trie, "car", "vehicle")
-TrieHard.insert(trie, "card", "payment")
+:ok = TrieHard.insert(trie, "cat", "feline")
+:ok = TrieHard.insert(trie, "car", %{wheels: 4})
+:ok = TrieHard.insert(trie, "card", {:payment, :plastic})
 
-# Lookup values
 {:ok, "feline"} = TrieHard.get(trie, "cat")
 {:not_found, nil} = TrieHard.get(trie, "dog")
 
-# Autocomplete
-{:ok, suggestions} = TrieHard.auto_complete(trie, "ca", 10)
-# Returns: ["car", "card", "cat"] (order may vary)
+# Lexicographic order; the limit keeps the first matches in that order
+{:ok, ["car", "card", "cat"]} = TrieHard.auto_complete(trie, "ca", 10)
+{:ok, ["car", "card"]} = TrieHard.auto_complete(trie, "ca", 2)
 
-# Prefix search
 {:ok, true} = TrieHard.prefix_search(trie, "ca")
 {:ok, false} = TrieHard.prefix_search(trie, "xyz")
 
-# Count words with prefix
 {:ok, 3} = TrieHard.count_prefix(trie, "ca")
 
-# Batch operations
-words = ["apple", "application", "apply"]
-:ok = TrieHard.add_word_list(trie, words)
+# Each word is stored with itself as the value
+:ok = TrieHard.add_word_list(trie, ["apple", "application", "apply"])
+{:ok, "apple"} = TrieHard.get(trie, "apple")
 ```
 
-## API Reference
+## API
 
-### Core Operations
+| Function | Returns |
+|---|---|
+| `new/0` | trie reference |
+| `insert/3` | `:ok` |
+| `get/2` | `{:ok, value}` or `{:not_found, nil}` |
+| `delete/2` | `:ok` |
+| `prefix_search/2` | `{:ok, boolean}` — whether any key starts with the prefix |
+| `auto_complete/3` | `{:ok, [key]}` — up to `max_results` (default 10) keys in lexicographic order |
+| `count_prefix/2` | `{:ok, count}` — exact number of keys with the prefix |
+| `add_word_list/2` | `:ok` — inserts each word with itself as the value |
 
-- `new/0` - Create a new empty trie
-- `insert/3` - Insert a key-value pair
-- `get/2` - Retrieve a value by key
-- `delete/2` - Remove a key and its value
+Keys must be UTF-8 binaries: a non-binary key raises `FunctionClauseError`, invalid UTF-8 raises `ArgumentError`.
 
-### Search Operations
+## Concurrency
 
-- `prefix_search/2` - Check if any words start with prefix
-- `auto_complete/3` - Get words starting with prefix (with limit)
-- `count_prefix/2` - Count words with given prefix
+A trie can be shared between processes. Reads run concurrently; writes are exclusive. Every
+operation first runs on the calling scheduler without blocking; if the trie is locked by a writer,
+the key is longer than 4 KiB, the value larger than 64 KiB, or a traversal needs more than 10,000
+node visits, it is retried on a dirty CPU scheduler, so normal schedulers are never blocked.
 
-### Batch Operations
+`add_word_list/2` always runs on a dirty scheduler and sends the list in chunks of 1,000 words,
+so readers interleave with large bulk loads. It is not atomic: if an element is not a UTF-8
+binary, `ArgumentError` is raised and the chunks before it remain inserted.
 
-- `add_word_list/2` - Insert multiple words efficiently
+## Memory
 
-## Advanced Usage
-
-### Unicode Support
-
-```elixir
-trie = TrieHard.new()
-
-TrieHard.insert(trie, "café", "coffee")
-TrieHard.insert(trie, "🦀", "crab emoji")
-TrieHard.insert(trie, "こんにちは", "hello in Japanese")
-
-{:ok, "coffee"} = TrieHard.get(trie, "café")
-{:ok, results} = TrieHard.auto_complete(trie, "caf", 5)
-```
-
-### Large Datasets
-
-```elixir
-trie = TrieHard.new()
-
-# Efficient batch insertion
-words = for i <- 1..10_000, do: "word_#{i}"
-TrieHard.add_word_list(trie, words)
-
-# Fast autocomplete even with large datasets
-{:ok, suggestions} = TrieHard.auto_complete(trie, "word_", 20)
-```
-
-### Concurrent Access
-
-```elixir
-trie = TrieHard.new()
-
-# Multiple processes can safely access the same trie
-tasks = for i <- 1..100 do
-  Task.async(fn ->
-    TrieHard.insert(trie, "process_#{i}", "data_#{i}")
-    TrieHard.get(trie, "process_#{i}")
-  end)
-end
-
-results = Task.await_many(tasks)
-```
+A trie lives in native memory and is freed when its last reference is garbage collected, on the
+scheduler thread that runs that collection. Freeing a trie with millions of keys takes
+correspondingly long on that thread.
 
 ## Development
 
-### Setup
-
-1. Install Rust nightly toolchain:
-```bash
-rustup toolchain install nightly
-rustup override set nightly  # In project directory
-```
-
-2. Install Elixir dependencies:
 ```bash
 mix deps.get
+TRIE_HARD_BUILD=true mix test
+cargo test --manifest-path native/trie_hard_native/Cargo.toml
 ```
 
-3. Compile:
-```bash
-mix compile
-```
-
-### Testing
-
-```bash
-# Run all tests
-mix test
-
-# Run with benchmarks
-mix test --include benchmark
-```
+`bin/test.sh` runs the same checks as CI (formatting, tests, clippy, `cargo test`).
+The Rust toolchain is pinned in `rust-toolchain.toml`; `rustup` installs it automatically.
 
 ## Architecture
 
-TrieHard uses Rustler to bridge Elixir with the high-performance `trie_hard_rs` Rust library:
-
-- **Elixir Layer**: Provides idiomatic Elixir API and documentation
-- **Rustler Bridge**: Manages memory-safe resource handling and type conversion
-- **Rust Core**: Leverages `trie_hard_rs` for optimal performance and memory efficiency
-
-The trie data structure is stored as a Rustler resource, ensuring thread-safety and efficient memory management while providing seamless integration with Elixir processes.
+- **Elixir** (`lib/trie_hard.ex`): public API; encodes values with `:erlang.term_to_binary/1` and
+  decodes them with `:erlang.binary_to_term/2` (`:safe`), so large terms are handled by yielding BIFs
+  instead of inside the NIF.
+- **NIF** (`native/trie_hard_native/src/lib.rs`): a `RwLock`-protected trie in a Rustler resource;
+  fast/dirty NIF pairs as described under Concurrency.
+- **Trie** (`native/trie_hard_native/src/sorted.rs`): byte-keyed nodes with sorted child arrays;
+  all traversals are iterative, so very long keys cannot overflow the stack.
 
 ## Contributing
 
 1. Fork the repository
 2. Create your feature branch
 3. Add tests for new functionality
-4. Ensure all tests pass: `mix test`
+4. Ensure `bin/test.sh` passes
 5. Submit a pull request
 
 ## License
@@ -187,6 +151,5 @@ Apache-2.0
 
 ## Acknowledgments
 
-- Built on the excellent [`trie_hard_rs`](https://crates.io/crates/trie_hard_rs) library by GhostVox
-- Powered by [Rustler](https://github.com/rusterlium/rustler) for seamless Rust-Elixir integration
-
+- Powered by [Rustler](https://github.com/rusterlium/rustler) and
+  [rustler_precompiled](https://github.com/philss/rustler_precompiled)

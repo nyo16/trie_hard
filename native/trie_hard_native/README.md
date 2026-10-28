@@ -1,20 +1,14 @@
-# NIF for TrieHard.Native
+# trie_hard_native
 
-## To build the NIF module:
+Rust NIF behind `TrieHard.Native` (loaded via `rustler_precompiled`, see `lib/trie_hard/native.ex`).
 
-- Your NIF will now build along with your project.
+- `src/lib.rs` — NIF entry points (fast/dirty pairs) and the `RwLock`-protected resource
+- `src/sorted.rs` — byte-keyed trie with sorted child arrays
+- `src/value.rs` — stored value representation
 
-## To load the NIF:
-
-```elixir
-defmodule TrieHard.Native do
-  use Rustler, otp_app: :trie_again, crate: "trie_again_native"
-
-  # When your NIF is loaded, it will override this function.
-  def add(_a, _b), do: :erlang.nif_error(:nif_not_loaded)
-end
+```bash
+cargo test    # unit + property tests
+cargo clippy --all-targets -- -Dwarnings
 ```
 
-## Examples
-
-[This](https://github.com/rusterlium/NifIo) is a complete example of a NIF written in Rust.
+The toolchain is pinned in the repository's `rust-toolchain.toml`; MSRV is 1.91.

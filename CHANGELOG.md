@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.9] - Unreleased
+
+### Changed
+
+- `auto_complete/3` returns keys in lexicographic (codepoint) order, and a limit keeps the
+  first matches in that order. Previously the order was arbitrary and could differ between runs.
+- Nodes are byte-keyed with sorted child arrays instead of per-character hash maps:
+  memory per key drops from ~2,800 to ~760 bytes (200,000-key benchmark).
+- Reads run concurrently (`RwLock` instead of `Mutex`). Calls never block a normal scheduler:
+  when the trie is locked, the key exceeds 4 KiB, the value exceeds 64 KiB, or a traversal
+  exceeds 10,000 node visits, the call is retried on a dirty CPU scheduler.
+- `add_word_list/2` runs on a dirty scheduler and sends the list in chunks of 1,000 words, so
+  readers interleave with bulk loads. It is not atomic: a non-UTF-8 or non-binary element raises
+  `ArgumentError` and earlier chunks stay inserted.
+- Values are always stored in external term format, encoded and decoded in Elixir
+  (`binary_to_term/2` with `:safe`). A string value that happened to be valid external term
+  format is no longer decoded by mistake on `get/2`.
+- Minimum `rustler_precompiled` is 0.10 (drops the `castore` dependency); `rustler` (optional)
+  is `~> 0.37`.
+- Precompiled NIF versions are 2.16 and 2.17; 2.15 is dropped (unused by OTP 26+).
+- The Hex package now includes the NIF sources, so `TRIE_HARD_BUILD=true` works for Hex installs.
+- Release artifacts are built by a read-only job and attested in a separate publish job;
+  `scripts/release.sh` verifies attestations before generating checksums.
+
+### Removed
+
+- The wall-clock `:benchmark` test module; use `bench/trie_bench.exs` (`MIX_ENV=bench`).
+
 ## [0.2.8] - 2026-10-28
 
 ### Fixed
@@ -99,12 +127,13 @@ If upgrading from 0.1.0:
 
 - Initial release of TrieHard (originally named TrieAgain)
 - Complete Trie implementation powered by trie_hard_rs Rust library
+  (replaced by an in-house implementation in `src/trie.rs` in 0.2.x; trie_hard_rs is no longer used)
 - Core operations: `new/0`, `insert/3`, `get/2`, `delete/2`
 - Search operations: `prefix_search/2`, `auto_complete/3`, `count_prefix/2`
 - Batch operations: `add_word_list/2` for efficient bulk insertions
 - Thread-safe concurrent access with Rust's safety guarantees
 - Full Unicode support including emojis
-- High-performance benchmarks:
+- Benchmarks (measured on a debug NIF build; superseded by the release-build numbers in the README since 0.2.9):
   - Insert: 0.66μs per word (individual), 0.59μs per word (batch)
   - Lookup: 2μs
   - Autocomplete: 155μs for 100 results
@@ -115,7 +144,8 @@ If upgrading from 0.1.0:
 
 ### Technical Details
 
-- Requires Rust nightly toolchain for edition 2024 support
+- Requires Rust nightly toolchain for edition 2024 support (no longer true: stable Rust, edition 2021,
+  MSRV 1.91 since 0.2.8)
 - Built with Rustler for seamless Elixir-Rust integration
-- Uses `trie_hard_rs` v0.1.0 for core trie functionality
+- Uses `trie_hard_rs` v0.1.0 for core trie functionality (removed in 0.2.x)
 - Elixir 1.18+ compatibility

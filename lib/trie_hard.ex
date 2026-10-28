@@ -1,16 +1,17 @@
 defmodule TrieHard do
   @moduledoc """
-  A blazing fast, memory-efficient Trie (prefix tree) implementation for Elixir
-  with autocomplete support, powered by the trie_hard_rs Rust library.
+  A fast, memory-efficient trie (prefix tree) with autocomplete, implemented as a
+  Rust NIF.
 
   ## Features
 
-  - **Fast operations**: Sub-microsecond autocomplete performance
-  - **Memory efficient**: Shared prefix storage
-  - **Unicode support**: Full UTF-8 character support
-  - **Generic values**: Store any Erlang term as values
-  - **Batch operations**: Efficient bulk insertions
-  - **Thread-safe**: Concurrent access support
+  - **Fast**: sub-microsecond lookups and prefix checks
+  - **Compact**: shared prefixes, byte-keyed nodes with sorted child arrays
+  - **Deterministic**: `auto_complete/3` returns keys in lexicographic order
+  - **Unicode**: keys are UTF-8 strings; non-binary keys raise `FunctionClauseError`,
+    invalid UTF-8 raises `ArgumentError`
+  - **Any value**: values are arbitrary Erlang terms
+  - **Concurrent**: see "Concurrency" below
 
   ## Example
 
@@ -23,9 +24,21 @@ defmodule TrieHard do
       :ok
       iex> TrieHard.get(trie, "cat")
       {:ok, :feline}
-      iex> {:ok, results} = TrieHard.auto_complete(trie, "ca", 10)
-      iex> Enum.sort(results)
-      ["car", "card", "cat"]
+      iex> TrieHard.auto_complete(trie, "ca", 10)
+      {:ok, ["car", "card", "cat"]}
+
+  ## Concurrency
+
+  A trie can be shared by any number of processes. Reads run concurrently and
+  writes are exclusive (a read-write lock). Each call first runs on the calling
+  scheduler without blocking; when the trie is locked by a writer, the key is
+  longer than 4 KiB, the value is larger than 64 KiB, or a traversal needs more
+  than 10,000 node visits, it is transparently retried on a dirty CPU scheduler.
+  `add_word_list/2` always runs on a dirty scheduler, in chunks of 1,000 words.
+
+  Values are encoded with `:erlang.term_to_binary/1` and decoded with
+  `:erlang.binary_to_term/2` (`[:safe]`) in the calling process, never inside
+  the NIF.
 
   ## Memory
 
