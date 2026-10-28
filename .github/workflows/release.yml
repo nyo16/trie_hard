@@ -7,7 +7,6 @@ on:
   push:
     branches:
       - master
-      - feat/support_for_erlang_terms
     paths:
       - "native/**"
       - ".github/workflows/release.yml"
@@ -20,20 +19,21 @@ on:
       - "rust-toolchain.toml"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  build_release:
+  build:
     name: NIF ${{ matrix.nif }} - ${{ matrix.job.target }} (${{ matrix.job.os }})
     runs-on: ${{ matrix.job.os }}
 
     permissions:
-      contents: write
-      id-token: write
-      attestations: write
+      contents: read
 
     strategy:
       fail-fast: false
       matrix:
-        nif: ["2.15", "2.16"]
+        nif: ["2.16", "2.17"]
         job:
           - { target: aarch64-apple-darwin,         os: macos-15 }
           - { target: aarch64-unknown-linux-gnu,    os: ubuntu-22.04, use-cross: true }
@@ -49,7 +49,7 @@ jobs:
 
     steps:
       - name: Checkout source code
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Extract crate information
         shell: bash
@@ -66,7 +66,8 @@ jobs:
         run: |
           rustup target add ${{ matrix.job.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         with:
           prefix-key: v0-precomp
           shared-key: ${{ matrix.job.target }}-${{ matrix.nif }}
@@ -75,31 +76,49 @@ jobs:
 
       - name: Build the project
         id: build-crate
-        uses: philss/rustler-precompiled-action@v1.1.4
+        uses: philss/rustler-precompiled-action@67ed0cc2d6a423e4c4cd9ad651dcc6c90f802cdb # v1.1.5
         with:
           project-name: trie_hard_native
           project-version: ${{ env.PROJECT_VERSION }}
           target: ${{ matrix.job.target }}
           nif-version: ${{ matrix.nif }}
           use-cross: ${{ matrix.job.use-cross }}
-          cross-version: ${{ matrix.job.cross-version || 'from-source' }}
+          cross-version: ${{ matrix.job.cross-version || 'v0.2.5' }}
           project-dir: "native/trie_hard_native"
           cargo-args: ${{ matrix.job.cargo-args }}
 
-      - name: Artifact attestation
-        uses: actions/attest-build-provenance@v3
-        with:
-          subject-path: ${{ steps.build-crate.outputs.file-path }}
-
       - name: Artifact upload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ steps.build-crate.outputs.file-name }}
           path: ${{ steps.build-crate.outputs.file-path }}
+          if-no-files-found: error
+
+  publish:
+    name: Attest and publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Artifact attestation
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+        with:
+          subject-path: dist/*.tar.gz
 
       - name: Publish archives and packages
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
-          files: |
-            ${{ steps.build-crate.outputs.file-path }}
-        if: startsWith(github.ref, 'refs/tags/')
+          files: dist/*.tar.gz
+          fail_on_unmatched_files: true

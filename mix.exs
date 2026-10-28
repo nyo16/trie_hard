@@ -27,8 +27,8 @@ defmodule TrieHard.MixProject do
 
   defp deps do
     [
-      {:rustler, ">= 0.0.0", optional: true},
-      {:rustler_precompiled, "~> 0.8.0"},
+      {:rustler, "~> 0.37", optional: true},
+      {:rustler_precompiled, "~> 0.10"},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:benchee, "~> 1.3", only: :bench}
     ]
@@ -44,11 +44,16 @@ defmodule TrieHard.MixProject do
   defp package do
     [
       name: "trie_hard",
-      files: ~w(lib .formatter.exs mix.exs README.md LICENSE CHANGELOG.md checksum-*.exs),
+      files: ~w(
+        lib .formatter.exs mix.exs README.md LICENSE CHANGELOG.md checksum-*.exs
+        native/trie_hard_native/src native/trie_hard_native/.cargo
+        native/trie_hard_native/Cargo.toml native/trie_hard_native/Cargo.lock
+        native/trie_hard_native/Cross.toml
+      ),
       licenses: ["Apache-2.0"],
       links: %{
         GitHub: @source_url,
-        Changelog: "#{@source_url}/blob/main/CHANGELOG.md"
+        Changelog: "#{@source_url}/blob/master/CHANGELOG.md"
       },
       maintainers: ["Niko"]
     ]

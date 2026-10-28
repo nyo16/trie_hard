@@ -1,7 +1,3 @@
-# Provides a small build size, but takes more time to build.
-[profile.release]
-lto = true
-
 [target.x86_64-apple-darwin]
 rustflags = [
   "-C", "link-arg=-undefined",

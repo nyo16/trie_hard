@@ -1,9 +1,11 @@
 [package]
 name = "trie_hard_native"
-version = "0.1.0"
-authors = []
+# Kept equal to the Elixir package version (scripts/release.sh bumps both).
+version = "0.2.7"
+authors = ["Niko"]
 edition = "2021"
 rust-version = "1.91"
+publish = false
 
 [lib]
 name = "trie_hard_native"
@@ -11,12 +13,18 @@ path = "src/lib.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
-rustler = "0.37.0"
+rustler = "0.37.4"
 
 [dev-dependencies]
 proptest = "1"
 
 [features]
-default = ["nif_version_2_15"]
-nif_version_2_15 = ["rustler/nif_version_2_15"]
+default = ["nif_version_2_16"]
 nif_version_2_16 = ["rustler/nif_version_2_16"]
+nif_version_2_17 = ["rustler/nif_version_2_17"]
+
+# Never `panic = "abort"`: rustler turns NIF panics into Erlang exceptions,
+# which requires unwinding.
+[profile.release]
+lto = true
+codegen-units = 1

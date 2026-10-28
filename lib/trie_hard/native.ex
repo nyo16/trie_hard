@@ -22,7 +22,7 @@ defmodule TrieHard.Native do
 
       x86_64-pc-windows-gnu
     ),
-    nif_versions: ["2.15", "2.16"],
+    nif_versions: ["2.16", "2.17"],
     mode: mode,
     force_build: System.get_env("TRIE_HARD_BUILD") in ["1", "true"]
 

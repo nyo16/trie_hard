@@ -1,6 +1,6 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-set -e
+set -euo pipefail
 
 # Colors for output
 RED='\033[0;31m'
@@ -36,6 +36,12 @@ update_version() {
     local new_version=$1
     sed -i.bak "s/@version \".*\"/@version \"$new_version\"/" mix.exs
     rm mix.exs.bak
+
+    # Bump the first `version = ` line (the [package] section) in Cargo.toml
+    local cargo_toml="native/trie_hard_native/Cargo.toml"
+    awk -v v="$new_version" '!done && /^version = / { print "version = \"" v "\""; done = 1; next } { print }' \
+        "$cargo_toml" > "$cargo_toml.tmp"
+    mv "$cargo_toml.tmp" "$cargo_toml"
 }
 
 # Function to validate version format
@@ -50,8 +56,12 @@ validate_version() {
 # Function to check if tag already exists
 check_tag_exists() {
     local tag=$1
-    if git tag -l | grep -q "^$tag$"; then
-        print_error "Tag $tag already exists!"
+    if git tag -l | grep -qx -- "$tag"; then
+        print_error "Tag $tag already exists locally!"
+        exit 1
+    fi
+    if [[ -n "$(git ls-remote --tags origin "refs/tags/$tag")" ]]; then
+        print_error "Tag $tag already exists on origin!"
         exit 1
     fi
 }
@@ -84,11 +94,10 @@ check_formatting() {
     fi
 
     print_info "Checking Rust formatting..."
-    if ! cd native/trie_hard_native && cargo fmt -- --check; then
+    if ! (cd native/trie_hard_native && cargo fmt -- --check); then
         print_error "Rust code is not formatted. Run 'cargo fmt' first."
         exit 1
     fi
-    cd ../..
 
     print_success "All code is properly formatted!"
 }
@@ -120,6 +129,31 @@ wait_for_actions() {
 # Function to generate checksum file
 generate_checksum() {
     local version=$1
+    print_info "Verifying build provenance attestations for release v$version..."
+    local assets_dir
+    assets_dir=$(mktemp -d)
+    if ! gh release download "v$version" --repo nyo16/trie_hard --dir "$assets_dir" --pattern '*.tar.gz'; then
+        print_error "Failed to download release assets for v$version."
+        rm -rf "$assets_dir"
+        exit 1
+    fi
+    local asset found=false
+    for asset in "$assets_dir"/*.tar.gz; do
+        [[ -e "$asset" ]] || continue
+        found=true
+        if ! gh attestation verify "$asset" --repo nyo16/trie_hard; then
+            print_error "Attestation verification failed for $(basename "$asset"). Aborting."
+            rm -rf "$assets_dir"
+            exit 1
+        fi
+    done
+    rm -rf "$assets_dir"
+    if [[ "$found" == "false" ]]; then
+        print_error "No release assets found for v$version."
+        exit 1
+    fi
+    print_success "All release assets have valid attestations!"
+
     print_info "Generating checksum file for precompiled NIFs..."
 
     # Download all precompiled NIFs and generate checksum
@@ -131,7 +165,8 @@ generate_checksum() {
 
     # Check if checksum file was created
     if ls checksum-*.exs 1> /dev/null 2>&1; then
-        local checksum_file=$(ls checksum-*.exs)
+        local checksum_file
+        checksum_file=$(ls checksum-*.exs)
         print_success "Checksum file created: $checksum_file"
     else
         print_error "No checksum file found. This is required for publishing to Hex."
@@ -210,11 +245,11 @@ COMPLETE WORKFLOW:
     3. Check if tag already exists
     4. Run tests (unless --skip-tests)
     5. Check code formatting (unless --skip-format)
-    6. Update version in mix.exs
+    6. Update version in mix.exs and native/trie_hard_native/Cargo.toml
     7. Commit version change
     8. Create and push git tag
     9. Wait for GitHub Actions to build all NIFs
-    10. Generate checksum file from precompiled NIFs
+    10. Verify artifact attestations, generate checksum file from precompiled NIFs
     11. Verify package contents
     12. Publish to Hex.pm
 
@@ -299,6 +334,7 @@ fi
 validate_version "$VERSION"
 
 if [[ "$HEX_ONLY" == "false" ]]; then
+    git fetch --tags
     check_tag_exists "v$VERSION"
 
     if [[ "$DRY_RUN" == "false" ]]; then
@@ -332,8 +368,17 @@ if [[ "$HEX_ONLY" == "false" ]]; then
         update_version "$VERSION"
 
         print_info "Committing version change..."
-        git add mix.exs
+        git add mix.exs native/trie_hard_native/Cargo.toml
+        if ! git diff --quiet -- native/trie_hard_native/Cargo.lock; then
+            git add native/trie_hard_native/Cargo.lock
+        fi
         git commit -m "Bump version to $VERSION"
+
+        current_branch=$(git rev-parse --abbrev-ref HEAD)
+        if [[ "$current_branch" != "master" ]]; then
+            print_error "Releases must be pushed from master (current branch: $current_branch)."
+            exit 1
+        fi
 
         print_info "Pushing version change..."
         git push origin master
