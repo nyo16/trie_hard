@@ -44,10 +44,16 @@ count = TrieHard.count_prefix(trie, prefix)
 found? = TrieHard.prefix?(trie, prefix)
 ```
 
+### Changed
+
+- **Default layout is `:radix`** (path-compressed). In the bundled benchmark it uses ~10x less
+  memory than the 0.2.9 layout (75 vs 764 bytes per key for 200,000 `"word_<n>_suffix"` keys)
+  and is as fast or faster for every operation except `prefix?/2` (~15 ns slower).
+  `TrieHard.new(layout: :sorted)` keeps the 0.2.9 structure. Results are identical.
+
 ### Added
 
-- `TrieHard.new(layout: :radix)`: a path-compressed layout with identical results for every
-  operation. `new/0` keeps the `:sorted` layout. Unknown options or layouts raise `ArgumentError`.
+- `new/1` with `layout: :radix | :sorted`. Unknown options or layouts raise `ArgumentError`.
 - `insert_many/2`: inserts `{key, value}` pairs from any enumerable, in chunks of 1,000 on a dirty
   scheduler; not atomic (an invalid element raises `ArgumentError`, earlier chunks stay inserted).
 

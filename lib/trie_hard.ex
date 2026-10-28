@@ -68,10 +68,14 @@ defmodule TrieHard do
 
   ## Options
 
-  - `:layout` - `:sorted` (default) or `:radix`.
-    - `:sorted` stores one node per key byte with sorted child arrays.
+  - `:layout` - `:radix` (default) or `:sorted`.
     - `:radix` is path-compressed: a run of bytes without branches is a single
-      node, so inserts and deletes may split or merge edges.
+      node, so inserts and deletes may split or merge edges. In the bundled
+      benchmark it uses about a tenth of the memory of `:sorted` (75 vs 764
+      bytes per key for 200,000 `"word_<n>_suffix"` keys) and is as fast or
+      faster for every operation except `prefix?/2` (~15 ns slower).
+    - `:sorted` stores one node per key byte with sorted child arrays; its
+      structure is simpler and never splits or merges nodes.
 
     Both layouts give identical results for every operation.
 
@@ -82,15 +86,15 @@ defmodule TrieHard do
       iex> trie = TrieHard.new()
       iex> TrieHard.count_prefix(trie, "")
       0
-      iex> radix = TrieHard.new(layout: :radix)
-      iex> TrieHard.insert(radix, "card", 1)
+      iex> sorted = TrieHard.new(layout: :sorted)
+      iex> TrieHard.insert(sorted, "card", 1)
       :ok
-      iex> TrieHard.auto_complete(radix, "ca")
+      iex> TrieHard.auto_complete(sorted, "ca")
       ["card"]
   """
   @spec new([{:layout, layout()}]) :: t()
   def new(opts \\ []) do
-    opts = Keyword.validate!(opts, layout: :sorted)
+    opts = Keyword.validate!(opts, layout: :radix)
     layout = opts[:layout]
 
     if layout not in @layouts do

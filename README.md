@@ -4,8 +4,8 @@ A fast, memory-efficient trie (prefix tree) for Elixir with autocomplete, implem
 
 ## Features
 
-- **Fast**: sub-microsecond lookups and prefix checks; ~1 µs for 10 autocomplete results
-- **Compact**: shared prefixes, sorted byte-array children (~760 bytes per key in the benchmark below)
+- **Fast**: sub-microsecond lookups, prefix checks and 10-result autocompletes
+- **Compact**: path-compressed (radix) layout by default, ~75 bytes per key in the benchmark below
 - **Deterministic**: `auto_complete` returns keys in lexicographic (codepoint) order
 - **Unicode**: keys are UTF-8 strings, including emoji and combining characters
 - **Any value**: store any Erlang term
@@ -16,18 +16,25 @@ A fast, memory-efficient trie (prefix tree) for Elixir with autocomplete, implem
 Measured with `bench/trie_bench.exs` (release build) on an Apple M4 Max, macOS, Elixir 1.20.0 / OTP 29.1.1,
 against a trie of 100,000 `"word_<n>_suffix"` keys:
 
-| Operation | Time |
-|---|---|
-| `get/2` (hit) | 0.12 µs |
-| `prefix_search/2` | 0.10 µs |
-| `auto_complete/3`, 10 results | 0.90 µs |
-| `auto_complete/3`, 100 results | 6.2 µs |
-| `count_prefix/2`, 111 matches | 1.0 µs |
-| `count_prefix/2`, 11,112 matches | 164 µs |
-| `insert/3`, per key | 0.39 µs |
-| `add_word_list/2`, per key | 0.38 µs |
+| Operation | `:radix` (default) | `:sorted` |
+|---|---|---|
+| `get/2` (hit) | 0.15 µs | 0.14 µs |
+| `prefix?/2` | 0.11 µs | 0.10 µs |
+| `delete/2` + `insert/3` | 0.30 µs | 0.50 µs |
+| `auto_complete/3`, 10 results | 0.58 µs | 0.98 µs |
+| `auto_complete/3`, 100 results | 2.5 µs | 6.4 µs |
+| `count_prefix/2`, 111 matches | 0.24 µs | 1.2 µs |
+| `count_prefix/2`, 11,112 matches | 24 µs | 149 µs |
+| `insert/3`, per key (1,000 into a new trie) | 0.15 µs | 0.41 µs |
+| `insert_many/2`, per key | 0.15 µs | 0.42 µs |
+| `add_word_list/2`, per key | 0.09 µs | 0.37 µs |
 
-Memory: ~760 bytes per key (RSS delta for 200,000 keys).
+Memory per key (RSS delta for 200,000 keys, fresh VM per layout):
+
+| Keys | `:radix` | `:sorted` |
+|---|---|---|
+| `"word_<n>_suffix"` | 75 B | 764 B |
+| `"https://example.com/users/<n>/profile/settings"` | 165 B | 2,075 B |
 
 Run it yourself:
 
@@ -85,16 +92,16 @@ false = TrieHard.prefix?(trie, "xyz")
 :ok = TrieHard.add_word_list(trie, ["apple", "application", "apply"])
 {:ok, "apple"} = TrieHard.get(trie, "apple")
 
-# Path-compressed layout; same results for every operation
-radix = TrieHard.new(layout: :radix)
-:ok = TrieHard.insert(radix, "card", 1)
+# One node per key byte instead of path compression; same results for every operation
+sorted = TrieHard.new(layout: :sorted)
+:ok = TrieHard.insert(sorted, "card", 1)
 ```
 
 ## API
 
 | Function | Returns |
 |---|---|
-| `new/1` | an opaque trie (`TrieHard.t()`); option `layout: :sorted \| :radix` |
+| `new/1` | an opaque trie (`TrieHard.t()`); option `layout: :radix` (default) or `:sorted` |
 | `insert/3` | `:ok` |
 | `insert_many/2` | `:ok` — inserts `{key, value}` pairs from any enumerable |
 | `get/2` | `{:ok, value}` or `:error` |
@@ -141,8 +148,9 @@ The Rust toolchain is pinned in `rust-toolchain.toml`; `rustup` installs it auto
   instead of inside the NIF.
 - **NIF** (`native/trie_hard_native/src/lib.rs`): a `RwLock`-protected trie in a Rustler resource;
   fast/dirty NIF pairs as described under Concurrency.
-- **Trie** (`native/trie_hard_native/src/sorted.rs`): byte-keyed nodes with sorted child arrays;
-  all traversals are iterative, so very long keys cannot overflow the stack.
+- **Tries** (`native/trie_hard_native/src/`): `radix.rs` (path-compressed edges) and `sorted.rs`
+  (one node per byte, sorted child arrays), dispatched by `store.rs`. All traversals and frees are
+  iterative, so very long keys cannot overflow the stack.
 
 ## Contributing
 

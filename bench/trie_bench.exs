@@ -3,59 +3,60 @@
 #     MIX_ENV=bench TRIE_HARD_BUILD=true mix run bench/trie_bench.exs
 #
 # The :bench environment compiles the NIF in release mode (dev/test use debug).
-# Data is deterministic: keys are "word_<n>_suffix".
+# Data is deterministic: keys are "word_<n>_suffix". Every scenario runs once per
+# layout (Benchee inputs); memory is measured per layout in a fresh VM by
+# bench/memory.exs, for short shared-prefix keys ("words") and long URL-like keys.
 
-defmodule TrieBench do
-  @memory_words 200_000
+layouts = [:sorted, :radix]
 
-  def words(range), do: Enum.map(range, &"word_#{&1}_suffix")
+IO.puts("Memory, bytes per key (RSS delta, 200k keys):")
 
-  def build(words) do
-    trie = TrieHard.new()
-    :ok = TrieHard.add_word_list(trie, words)
-    trie
-  end
-
-  @doc "Resident set size delta per key after loading #{@memory_words} keys."
-  def bytes_per_word do
-    words = words(1..@memory_words)
-    :erlang.garbage_collect()
-    before = rss()
-    trie = build(words)
-    :erlang.garbage_collect()
-    loaded = rss()
-    @memory_words = TrieHard.count_prefix(trie, "word_")
-    div(loaded - before, @memory_words)
-  end
-
-  defp rss do
-    {out, 0} = System.cmd("ps", ["-o", "rss=", "-p", System.pid()])
-    out |> String.trim() |> String.to_integer() |> Kernel.*(1024)
-  end
+for keys <- ["words", "urls"], layout <- layouts do
+  {out, 0} = System.cmd("mix", ["run", "bench/memory.exs", "#{layout}", keys])
+  IO.puts("  #{String.pad_trailing(keys, 6)} #{String.pad_trailing("#{layout}", 7)} #{String.trim(out)}")
 end
 
-IO.puts("Memory: #{TrieBench.bytes_per_word()} bytes/word (RSS delta, 200k keys)\n")
+IO.puts("")
 
-batch = TrieBench.words(1..1_000)
-trie = TrieBench.build(TrieBench.words(1..100_000))
+words = fn range -> Enum.map(range, &"word_#{&1}_suffix") end
+batch = words.(1..1_000)
+pairs = Enum.map(batch, &{&1, &1})
+
+build = fn layout ->
+  trie = TrieHard.new(layout: layout)
+  :ok = TrieHard.add_word_list(trie, words.(1..100_000))
+  trie
+end
+
+inputs = Map.new(layouts, &{"#{&1}", {&1, build.(&1)}})
 
 Benchee.run(
   %{
-    "insert/3 x1000 (fresh trie)" => fn ->
-      t = TrieHard.new()
+    "insert/3 x1000 (fresh trie)" => fn {layout, _} ->
+      t = TrieHard.new(layout: layout)
       Enum.each(batch, &TrieHard.insert(t, &1, &1))
     end,
-    "add_word_list/2 x1000 (fresh trie)" => fn -> TrieHard.add_word_list(TrieHard.new(), batch) end,
-    "get/2 hit" => fn -> {:ok, _} = TrieHard.get(trie, "word_54321_suffix") end,
-    "get/2 miss" => fn -> :error = TrieHard.get(trie, "word_54321_suffiy") end,
-    "prefix?/2" => fn -> true = TrieHard.prefix?(trie, "word_5432") end,
-    "auto_complete/3 10" => fn -> _ = TrieHard.auto_complete(trie, "word_1", 10) end,
-    "auto_complete/3 100" => fn -> _ = TrieHard.auto_complete(trie, "word_1", 100) end,
-    "count_prefix/2 (111 keys)" => fn -> 111 = TrieHard.count_prefix(trie, "word_123") end,
-    "count_prefix/2 (11,112 keys, dirty)" => fn ->
+    "insert_many/2 x1000 (fresh trie)" => fn {layout, _} ->
+      TrieHard.insert_many(TrieHard.new(layout: layout), pairs)
+    end,
+    "add_word_list/2 x1000 (fresh trie)" => fn {layout, _} ->
+      TrieHard.add_word_list(TrieHard.new(layout: layout), batch)
+    end,
+    "delete/2 + insert/3" => fn {_, trie} ->
+      :ok = TrieHard.delete(trie, "word_54321_suffix")
+      :ok = TrieHard.insert(trie, "word_54321_suffix", 1)
+    end,
+    "get/2 hit" => fn {_, trie} -> {:ok, _} = TrieHard.get(trie, "word_54321_suffix") end,
+    "get/2 miss" => fn {_, trie} -> :error = TrieHard.get(trie, "word_54321_suffiy") end,
+    "prefix?/2" => fn {_, trie} -> true = TrieHard.prefix?(trie, "word_5432") end,
+    "auto_complete/3 10" => fn {_, trie} -> TrieHard.auto_complete(trie, "word_1", 10) end,
+    "auto_complete/3 100" => fn {_, trie} -> TrieHard.auto_complete(trie, "word_1", 100) end,
+    "count_prefix/2 (111 keys)" => fn {_, trie} -> 111 = TrieHard.count_prefix(trie, "word_123") end,
+    "count_prefix/2 (11,112 keys)" => fn {_, trie} ->
       11_112 = TrieHard.count_prefix(trie, "word_1")
     end
   },
+  inputs: inputs,
   warmup: 0.5,
   time: 2,
   print: [fast_warning: false]
