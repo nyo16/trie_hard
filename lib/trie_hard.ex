@@ -52,22 +52,53 @@ defmodule TrieHard do
   @type trie :: reference()
   @type key :: String.t()
   @type value :: term()
+  @typedoc "Node layout, see `new/1`."
+  @type layout :: :sorted | :radix
+
+  @layouts [:sorted, :radix]
 
   # Words per add_word_list NIF call; bounds how long the write lock is held.
   @word_list_chunk 1_000
 
   @doc """
-  Creates a new empty Trie.
+  Creates a new empty trie.
+
+  ## Options
+
+  - `:layout` - `:sorted` (default) or `:radix`.
+    - `:sorted` stores one node per key byte with sorted child arrays. Inserts and
+      deletes are simple and fast; long keys without shared prefixes cost one node
+      per byte.
+    - `:radix` is path-compressed: a run of bytes without branches is one node.
+      It uses less memory for long or sparse keys; inserts and deletes may split
+      or merge edges.
+
+    Both layouts give identical results for every operation.
+
+  Raises `ArgumentError` for unknown options or layouts.
 
   ## Examples
 
       iex> trie = TrieHard.new()
       iex> TrieHard.count_prefix(trie, "")
       {:ok, 0}
+      iex> radix = TrieHard.new(layout: :radix)
+      iex> TrieHard.insert(radix, "card", 1)
+      :ok
+      iex> TrieHard.auto_complete(radix, "ca")
+      {:ok, ["card"]}
   """
-  @spec new() :: trie()
-  def new do
-    Native.new_trie()
+  @spec new([{:layout, layout()}]) :: trie()
+  def new(opts \\ []) do
+    opts = Keyword.validate!(opts, layout: :sorted)
+    layout = opts[:layout]
+
+    if layout not in @layouts do
+      raise ArgumentError,
+            "expected :layout to be one of #{inspect(@layouts)}, got: #{inspect(layout)}"
+    end
+
+    Native.new_trie(layout)
   end
 
   @doc """

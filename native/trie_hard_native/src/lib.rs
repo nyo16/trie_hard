@@ -1,10 +1,12 @@
-use rustler::{Binary, Encoder, Env, NewBinary, ResourceArc, Term};
+use rustler::{Atom, Binary, Encoder, Env, NewBinary, NifResult, ResourceArc, Term};
 use std::sync::{PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError};
 
+mod radix;
 mod sorted;
+mod store;
 mod value;
 
-use sorted::{OverBudget, SortedTrie as Trie};
+use store::{Layout, OverBudget, Store};
 use value::Value;
 
 mod atoms {
@@ -13,6 +15,8 @@ mod atoms {
         not_found,
         self_key,
         dirty,
+        sorted,
+        radix,
     }
 }
 
@@ -46,7 +50,7 @@ impl Mode {
 }
 
 pub struct TrieResource {
-    trie: RwLock<Trie<Value>>,
+    trie: RwLock<Store<Value>>,
 }
 
 #[rustler::resource_impl]
@@ -55,7 +59,7 @@ impl rustler::Resource for TrieResource {}
 /// A panic while holding the lock must not brick the trie forever: every
 /// mutation leaves the structure consistent, so a poisoned guard is safe.
 impl TrieResource {
-    fn read(&self, mode: Mode) -> Option<RwLockReadGuard<'_, Trie<Value>>> {
+    fn read(&self, mode: Mode) -> Option<RwLockReadGuard<'_, Store<Value>>> {
         match mode {
             Mode::Blocking => Some(self.trie.read().unwrap_or_else(PoisonError::into_inner)),
             Mode::Fast => match self.trie.try_read() {
@@ -66,7 +70,7 @@ impl TrieResource {
         }
     }
 
-    fn write(&self, mode: Mode) -> Option<RwLockWriteGuard<'_, Trie<Value>>> {
+    fn write(&self, mode: Mode) -> Option<RwLockWriteGuard<'_, Store<Value>>> {
         match mode {
             Mode::Blocking => Some(self.trie.write().unwrap_or_else(PoisonError::into_inner)),
             Mode::Fast => match self.trie.try_write() {
@@ -96,11 +100,19 @@ fn encode_words<'a>(env: Env<'a>, words: &[Vec<u8>]) -> Term<'a> {
     terms.encode(env)
 }
 
+/// `layout` is `:sorted` or `:radix` (validated in Elixir; anything else is badarg).
 #[rustler::nif]
-fn new_trie() -> ResourceArc<TrieResource> {
-    ResourceArc::new(TrieResource {
-        trie: RwLock::new(Trie::new()),
-    })
+fn new_trie(layout: Atom) -> NifResult<ResourceArc<TrieResource>> {
+    let layout = if layout == atoms::sorted() {
+        Layout::Sorted
+    } else if layout == atoms::radix() {
+        Layout::Radix
+    } else {
+        return Err(rustler::Error::BadArg);
+    };
+    Ok(ResourceArc::new(TrieResource {
+        trie: RwLock::new(Store::new(layout)),
+    }))
 }
 
 fn insert_impl<'a>(

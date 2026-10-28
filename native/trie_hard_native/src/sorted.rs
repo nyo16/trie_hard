@@ -1,8 +1,6 @@
 //! Byte-keyed trie with sorted child arrays (one node per key byte).
 
-/// A traversal exceeded its node-visit budget; retry with a larger one.
-#[derive(Debug, PartialEq, Eq)]
-pub struct OverBudget;
+use crate::store::OverBudget;
 
 /// A trie node. Children are only reachable through the accessor methods
 /// below so the child representation can change without touching the
@@ -225,14 +223,11 @@ impl<T> SortedTrie<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use proptest::prelude::*;
-    use std::collections::BTreeMap;
-    use std::ops::Bound;
 
     const UNLIMITED: usize = usize::MAX;
 
     impl<T> SortedTrie<T> {
-        fn node_count(&self) -> usize {
+        pub(crate) fn node_count(&self) -> usize {
             let mut count = 0;
             let mut stack = vec![&self.root];
             while let Some(node) = stack.pop() {
@@ -376,75 +371,5 @@ mod tests {
         );
         assert_eq!(words(trie.complete(b"caf", 10, UNLIMITED)), ["café"]);
         assert_eq!(trie.complete(b"x", 10, UNLIMITED), Ok(vec![]));
-    }
-
-    #[derive(Debug, Clone)]
-    enum Op {
-        Insert(String, u32),
-        Delete(String),
-        Get(String),
-        Count(String),
-        Complete(String, usize),
-    }
-
-    fn key() -> impl Strategy<Value = String> {
-        "[ab\u{e9}\u{1F980}]{0,5}"
-    }
-
-    fn op() -> impl Strategy<Value = Op> {
-        prop_oneof![
-            3 => (key(), any::<u32>()).prop_map(|(k, v)| Op::Insert(k, v)),
-            2 => key().prop_map(Op::Delete),
-            1 => key().prop_map(Op::Get),
-            1 => key().prop_map(Op::Count),
-            1 => (key(), 0usize..8).prop_map(|(k, n)| Op::Complete(k, n)),
-        ]
-    }
-
-    fn with_prefix<'a>(
-        model: &'a BTreeMap<String, u32>,
-        prefix: &'a str,
-    ) -> impl Iterator<Item = &'a String> {
-        model
-            .range::<str, _>((Bound::Included(prefix), Bound::Unbounded))
-            .map(|(k, _)| k)
-            .take_while(move |k| k.starts_with(prefix))
-    }
-
-    proptest! {
-        #![proptest_config(ProptestConfig::with_cases(512))]
-
-        #[test]
-        fn matches_btreemap_model(ops in prop::collection::vec(op(), 0..64)) {
-            let mut trie = SortedTrie::new();
-            let mut model = BTreeMap::new();
-            for op in ops {
-                match op {
-                    Op::Insert(k, v) => {
-                        trie.insert(k.as_bytes(), v);
-                        model.insert(k, v);
-                    }
-                    Op::Delete(k) => {
-                        prop_assert_eq!(trie.delete(k.as_bytes()), model.remove(&k).is_some());
-                    }
-                    Op::Get(k) => prop_assert_eq!(trie.get(k.as_bytes()), model.get(&k)),
-                    Op::Count(p) => {
-                        let expected = with_prefix(&model, &p).count();
-                        prop_assert_eq!(trie.count(p.as_bytes(), UNLIMITED), Ok(expected));
-                        prop_assert_eq!(trie.has_prefix(p.as_bytes()), expected > 0);
-                    }
-                    Op::Complete(p, n) => {
-                        // BTreeMap<String> order is byte order, so results must match exactly.
-                        let expected: Vec<String> =
-                            with_prefix(&model, &p).take(n).cloned().collect();
-                        prop_assert_eq!(words(trie.complete(p.as_bytes(), n, UNLIMITED)), expected);
-                    }
-                }
-            }
-            for k in model.keys() {
-                prop_assert!(trie.delete(k.as_bytes()));
-            }
-            prop_assert_eq!(trie.node_count(), 1);
-        }
     }
 }
