@@ -9,7 +9,7 @@ defmodule TrieHard.ValueStorageTest do
     end
 
     for {key, value} <- pairs do
-      assert TrieHard.get(trie, key) == {:ok, value}
+      assert TrieHard.fetch(trie, key) == {:ok, value}
     end
 
     trie
@@ -106,7 +106,7 @@ defmodule TrieHard.ValueStorageTest do
 
       for value <- ["string", :atom, %{type: "map"}, "back_to_string"] do
         assert TrieHard.insert(trie, "key", value) == :ok
-        assert TrieHard.get(trie, "key") == {:ok, value}
+        assert TrieHard.fetch(trie, "key") == {:ok, value}
       end
     end
 

@@ -29,7 +29,7 @@ defmodule TrieHard.SchedulerTest do
             TrieHard.auto_complete(trie, "x", 1)
 
             for _ <- 1..100 do
-              TrieHard.get(trie, "w#{i}")
+              TrieHard.fetch(trie, "w#{i}")
               TrieHard.auto_complete(trie, "w#{i}", 10)
               TrieHard.count_prefix(trie, "w#{i}0")
               TrieHard.insert(trie, "r#{i}", i)

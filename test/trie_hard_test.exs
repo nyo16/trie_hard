@@ -16,7 +16,7 @@ defmodule TrieHardTest do
   describe "invalid handles" do
     test "a handle that is not a trie raises ArgumentError in every NIF-backed function" do
       for handle <- [make_ref(), nil, :trie] do
-        assert_raise ArgumentError, fn -> TrieHard.get(handle, "k") end
+        assert_raise ArgumentError, fn -> TrieHard.fetch(handle, "k") end
         assert_raise ArgumentError, fn -> TrieHard.insert(handle, "k", 1) end
         assert_raise ArgumentError, fn -> TrieHard.delete(handle, "k") end
         assert_raise ArgumentError, fn -> TrieHard.prefix?(handle, "k") end
@@ -43,7 +43,7 @@ defmodule TrieHardTest do
           case :rand.uniform(7) do
             1 -> {:insert, &TrieHard.insert(&1, key, step)}
             2 -> {:delete, &TrieHard.delete(&1, key)}
-            3 -> {:get, &TrieHard.get(&1, key)}
+            3 -> {:get, &TrieHard.fetch(&1, key)}
             4 -> {:count_prefix, &TrieHard.count_prefix(&1, key)}
             5 -> {:prefix?, &TrieHard.prefix?(&1, key)}
             6 -> {:auto_complete, &TrieHard.auto_complete(&1, String.slice(key, 0, 2), 5)}
@@ -69,20 +69,34 @@ defmodule TrieHardTest do
 
         assert TrieHard.count_prefix(trie, "") == 0
         assert TrieHard.auto_complete(trie, "", 10) == []
-        assert TrieHard.get(trie, "") == :error
+        assert TrieHard.fetch(trie, "") == {:error, :not_found}
       end
 
       test "inserts and retrieves values" do
         trie = TrieHard.new(layout: @layout)
 
         assert TrieHard.insert(trie, "hello", "world") == :ok
-        assert TrieHard.get(trie, "hello") == {:ok, "world"}
+        assert TrieHard.fetch(trie, "hello") == {:ok, "world"}
       end
 
-      test "returns :error for missing keys" do
+      test "fetch returns {:error, :not_found} for missing keys" do
         trie = TrieHard.new(layout: @layout)
 
-        assert TrieHard.get(trie, "missing") == :error
+        assert TrieHard.fetch(trie, "missing") == {:error, :not_found}
+      end
+
+      test "get returns the value, nil, or the given default" do
+        trie = TrieHard.new(layout: @layout)
+        TrieHard.insert(trie, "k", "v")
+        TrieHard.insert(trie, "nil", nil)
+
+        assert TrieHard.get(trie, "k") == "v"
+        assert TrieHard.get(trie, "k", :default) == "v"
+        assert TrieHard.get(trie, "missing") == nil
+        assert TrieHard.get(trie, "missing", :default) == :default
+        # A stored nil is a value: get/3 returns it, fetch/2 tells it apart.
+        assert TrieHard.get(trie, "nil", :default) == nil
+        assert TrieHard.fetch(trie, "nil") == {:ok, nil}
       end
 
       test "deletes keys" do
@@ -90,7 +104,7 @@ defmodule TrieHardTest do
 
         assert TrieHard.insert(trie, "hello", "world") == :ok
         assert TrieHard.delete(trie, "hello") == :ok
-        assert TrieHard.get(trie, "hello") == :error
+        assert TrieHard.fetch(trie, "hello") == {:error, :not_found}
         assert TrieHard.count_prefix(trie, "") == 0
       end
 
@@ -103,7 +117,7 @@ defmodule TrieHardTest do
 
         assert TrieHard.delete(trie, "card") == :ok
         assert TrieHard.auto_complete(trie, "", 10) == ["cart"]
-        assert TrieHard.get(trie, "cart") == {:ok, "cart"}
+        assert TrieHard.fetch(trie, "cart") == {:ok, "cart"}
       end
 
       test "handles multiple key-value pairs" do
@@ -113,9 +127,9 @@ defmodule TrieHardTest do
         assert TrieHard.insert(trie, "car", "vehicle") == :ok
         assert TrieHard.insert(trie, "card", "payment") == :ok
 
-        assert TrieHard.get(trie, "cat") == {:ok, "feline"}
-        assert TrieHard.get(trie, "car") == {:ok, "vehicle"}
-        assert TrieHard.get(trie, "card") == {:ok, "payment"}
+        assert TrieHard.fetch(trie, "cat") == {:ok, "feline"}
+        assert TrieHard.fetch(trie, "car") == {:ok, "vehicle"}
+        assert TrieHard.fetch(trie, "card") == {:ok, "payment"}
       end
     end
 
@@ -197,7 +211,7 @@ defmodule TrieHardTest do
         assert TrieHard.add_word_list(trie, words) == :ok
 
         for word <- words do
-          assert TrieHard.get(trie, word) == {:ok, word}
+          assert TrieHard.fetch(trie, word) == {:ok, word}
         end
       end
 
@@ -223,7 +237,7 @@ defmodule TrieHardTest do
 
         assert_raise ArgumentError, fn -> TrieHard.add_word_list(trie, words) end
         assert TrieHard.count_prefix(trie, "w") == 1_000
-        assert TrieHard.get(trie, "ok") == :error
+        assert TrieHard.fetch(trie, "ok") == {:error, :not_found}
       end
 
       test "bulk chunks are also bounded by bytes" do
@@ -233,15 +247,15 @@ defmodule TrieHardTest do
         # `big` alone exceeds the 1 MiB chunk bound, so it is sent (and kept)
         # before the chunk holding the invalid element fails.
         assert_raise ArgumentError, fn -> TrieHard.add_word_list(trie, [big, "ok", :bad]) end
-        assert TrieHard.get(trie, big) == {:ok, big}
-        assert TrieHard.get(trie, "ok") == :error
+        assert TrieHard.fetch(trie, big) == {:ok, big}
+        assert TrieHard.fetch(trie, "ok") == {:error, :not_found}
 
         assert_raise ArgumentError, fn ->
           TrieHard.insert_many(trie, [{"v", big}, {"ok", 1}, :bad])
         end
 
-        assert TrieHard.get(trie, "v") == {:ok, big}
-        assert TrieHard.get(trie, "ok") == :error
+        assert TrieHard.fetch(trie, "v") == {:ok, big}
+        assert TrieHard.fetch(trie, "ok") == {:error, :not_found}
       end
 
       test "add_word_list accepts any enumerable" do
@@ -257,7 +271,7 @@ defmodule TrieHardTest do
         trie = TrieHard.new(layout: @layout)
 
         assert TrieHard.insert(trie, "", "empty") == :ok
-        assert TrieHard.get(trie, "") == {:ok, "empty"}
+        assert TrieHard.fetch(trie, "") == {:ok, "empty"}
         assert TrieHard.prefix?(trie, "")
         assert TrieHard.auto_complete(trie, "", 10) == [""]
       end
@@ -269,9 +283,9 @@ defmodule TrieHardTest do
         assert TrieHard.insert(trie, "naïve", "innocent") == :ok
         assert TrieHard.insert(trie, "🦀", "crab") == :ok
 
-        assert TrieHard.get(trie, "café") == {:ok, "coffee"}
-        assert TrieHard.get(trie, "naïve") == {:ok, "innocent"}
-        assert TrieHard.get(trie, "🦀") == {:ok, "crab"}
+        assert TrieHard.fetch(trie, "café") == {:ok, "coffee"}
+        assert TrieHard.fetch(trie, "naïve") == {:ok, "innocent"}
+        assert TrieHard.fetch(trie, "🦀") == {:ok, "crab"}
         assert TrieHard.auto_complete(trie, "caf", 5) == ["café"]
         assert TrieHard.auto_complete(trie, "", 5) == ["café", "naïve", "🦀"]
       end
@@ -282,7 +296,7 @@ defmodule TrieHardTest do
         long_value = String.duplicate("b", 1000)
 
         assert TrieHard.insert(trie, long_key, long_value) == :ok
-        assert TrieHard.get(trie, long_key) == {:ok, long_value}
+        assert TrieHard.fetch(trie, long_key) == {:ok, long_value}
       end
 
       test "overwrites existing values" do
@@ -290,20 +304,20 @@ defmodule TrieHardTest do
 
         assert TrieHard.insert(trie, "key", "value1") == :ok
         assert TrieHard.insert(trie, "key", "value2") == :ok
-        assert TrieHard.get(trie, "key") == {:ok, "value2"}
+        assert TrieHard.fetch(trie, "key") == {:ok, "value2"}
         assert TrieHard.count_prefix(trie, "key") == 1
       end
 
-      test "delete returns :error for absent keys and keeps the rest" do
+      test "delete returns {:error, :not_found} for absent keys and keeps the rest" do
         trie = TrieHard.new(layout: @layout)
         TrieHard.insert(trie, "card", 1)
 
-        assert TrieHard.delete(trie, "non-existing") == :error
-        assert TrieHard.delete(trie, "car") == :error
-        assert TrieHard.delete(trie, "cards") == :error
-        assert TrieHard.get(trie, "card") == {:ok, 1}
+        assert TrieHard.delete(trie, "non-existing") == {:error, :not_found}
+        assert TrieHard.delete(trie, "car") == {:error, :not_found}
+        assert TrieHard.delete(trie, "cards") == {:error, :not_found}
+        assert TrieHard.fetch(trie, "card") == {:ok, 1}
         assert TrieHard.delete(trie, "card") == :ok
-        assert TrieHard.delete(trie, "card") == :error
+        assert TrieHard.delete(trie, "card") == {:error, :not_found}
       end
 
       test "handles 1000 words" do
@@ -311,7 +325,7 @@ defmodule TrieHardTest do
         words = for i <- 1..1000, do: "word#{i}"
 
         assert TrieHard.add_word_list(trie, words) == :ok
-        assert TrieHard.get(trie, "word500") == {:ok, "word500"}
+        assert TrieHard.fetch(trie, "word500") == {:ok, "word500"}
         assert TrieHard.prefix?(trie, "word1")
         assert TrieHard.count_prefix(trie, "word1") == 112
 
@@ -326,7 +340,7 @@ defmodule TrieHardTest do
 
         for key <- [nil, :atom, 1, ~c"charlist"] do
           assert_raise FunctionClauseError, fn -> TrieHard.insert(trie, key, 1) end
-          assert_raise FunctionClauseError, fn -> TrieHard.get(trie, key) end
+          assert_raise FunctionClauseError, fn -> TrieHard.fetch(trie, key) end
           assert_raise FunctionClauseError, fn -> TrieHard.delete(trie, key) end
           assert_raise FunctionClauseError, fn -> TrieHard.prefix?(trie, key) end
           assert_raise FunctionClauseError, fn -> TrieHard.auto_complete(trie, key, 1) end
@@ -339,7 +353,7 @@ defmodule TrieHardTest do
         bad = <<0xFF, 0xFE>>
 
         assert_raise ArgumentError, fn -> TrieHard.insert(trie, bad, 1) end
-        assert_raise ArgumentError, fn -> TrieHard.get(trie, bad) end
+        assert_raise ArgumentError, fn -> TrieHard.fetch(trie, bad) end
         assert_raise ArgumentError, fn -> TrieHard.delete(trie, bad) end
         assert_raise ArgumentError, fn -> TrieHard.prefix?(trie, bad) end
         assert_raise ArgumentError, fn -> TrieHard.count_prefix(trie, bad) end
@@ -368,9 +382,9 @@ defmodule TrieHardTest do
         for key <- ["café", "🦀", "e\u0301"] do
           assert TrieHard.insert(trie, key, key) == :ok
           assert TrieHard.delete(trie, key) == :ok
-          assert TrieHard.get(trie, key) == :error
+          assert TrieHard.fetch(trie, key) == {:error, :not_found}
           assert TrieHard.insert(trie, key, "again") == :ok
-          assert TrieHard.get(trie, key) == {:ok, "again"}
+          assert TrieHard.fetch(trie, key) == {:ok, "again"}
         end
       end
 
@@ -402,7 +416,7 @@ defmodule TrieHardTest do
         assert TrieHard.auto_complete(trie, "", 1) == [key]
         assert TrieHard.count_prefix(trie, "a") == 1
         assert TrieHard.delete(trie, key) == :ok
-        assert TrieHard.get(trie, key) == :error
+        assert TrieHard.fetch(trie, key) == {:error, :not_found}
       end
 
       test "prefix? on an empty trie is false" do
@@ -488,8 +502,8 @@ defmodule TrieHardTest do
           assert Native.delete(trie, "ab") == true
         end
 
-        assert TrieHard.get(trie, "ab") == :error
-        assert TrieHard.get(trie, long) == {:ok, 1}
+        assert TrieHard.fetch(trie, "ab") == {:error, :not_found}
+        assert TrieHard.fetch(trie, long) == {:ok, 1}
       end
     end
 
@@ -502,7 +516,7 @@ defmodule TrieHardTest do
         assert TrieHard.insert_many(trie, mixed ++ many) == :ok
 
         for {key, value} <- mixed ++ many do
-          assert TrieHard.get(trie, key) == {:ok, value}
+          assert TrieHard.fetch(trie, key) == {:ok, value}
         end
 
         assert TrieHard.count_prefix(trie, "k") == 2_500
@@ -517,9 +531,9 @@ defmodule TrieHardTest do
         assert TrieHard.insert_many(trie, Stream.map(1..3, &{"s#{&1}", &1})) == :ok
         assert TrieHard.insert_many(trie, [{"c", 1}, {"c", 2}]) == :ok
 
-        assert TrieHard.get(trie, "a") == {:ok, :new}
-        assert TrieHard.get(trie, "b") == {:ok, 2}
-        assert TrieHard.get(trie, "c") == {:ok, 2}
+        assert TrieHard.fetch(trie, "a") == {:ok, :new}
+        assert TrieHard.fetch(trie, "b") == {:ok, 2}
+        assert TrieHard.fetch(trie, "c") == {:ok, 2}
         assert TrieHard.auto_complete(trie, "s") == ["s1", "s2", "s3"]
       end
 
@@ -537,14 +551,14 @@ defmodule TrieHardTest do
       test "get after add_word_list returns the word" do
         trie = TrieHard.new(layout: @layout)
         assert TrieHard.add_word_list(trie, ["alpha", "beta"]) == :ok
-        assert TrieHard.get(trie, "alpha") == {:ok, "alpha"}
+        assert TrieHard.fetch(trie, "alpha") == {:ok, "alpha"}
       end
 
       test "add_word_list overwrites a prior insert value" do
         trie = TrieHard.new(layout: @layout)
         assert TrieHard.insert(trie, "alpha", %{v: 1}) == :ok
         assert TrieHard.add_word_list(trie, ["alpha"]) == :ok
-        assert TrieHard.get(trie, "alpha") == {:ok, "alpha"}
+        assert TrieHard.fetch(trie, "alpha") == {:ok, "alpha"}
       end
 
       test "large values round-trip" do
@@ -554,8 +568,8 @@ defmodule TrieHardTest do
 
         assert TrieHard.insert(trie, "big", big) == :ok
         assert TrieHard.insert(trie, "deep", deep) == :ok
-        assert TrieHard.get(trie, "big") == {:ok, big}
-        assert TrieHard.get(trie, "deep") == {:ok, deep}
+        assert TrieHard.fetch(trie, "big") == {:ok, big}
+        assert TrieHard.fetch(trie, "deep") == {:ok, deep}
       end
 
       test "keys longer than the fast-path limit work" do
@@ -563,12 +577,12 @@ defmodule TrieHardTest do
         key = String.duplicate("k", 5_000)
 
         assert TrieHard.insert(trie, key, :v) == :ok
-        assert TrieHard.get(trie, key) == {:ok, :v}
+        assert TrieHard.fetch(trie, key) == {:ok, :v}
         assert TrieHard.prefix?(trie, key)
         assert TrieHard.count_prefix(trie, key) == 1
         assert TrieHard.auto_complete(trie, key, 5) == [key]
         assert TrieHard.delete(trie, key) == :ok
-        assert TrieHard.get(trie, key) == :error
+        assert TrieHard.fetch(trie, key) == {:error, :not_found}
       end
     end
 
@@ -582,7 +596,7 @@ defmodule TrieHardTest do
           |> Enum.map(fn i ->
             Task.async(fn ->
               TrieHard.insert(trie, "process#{i}", "data#{i}")
-              TrieHard.get(trie, "shared")
+              TrieHard.fetch(trie, "shared")
             end)
           end)
           |> Task.await_many()
@@ -590,7 +604,7 @@ defmodule TrieHardTest do
         assert results == List.duplicate({:ok, "data"}, 10)
 
         for i <- 1..10 do
-          assert TrieHard.get(trie, "process#{i}") == {:ok, "data#{i}"}
+          assert TrieHard.fetch(trie, "process#{i}") == {:ok, "data#{i}"}
         end
       end
 
@@ -617,8 +631,8 @@ defmodule TrieHardTest do
               observe = fn ->
                 count = if i <= 5, do: TrieHard.count_prefix(trie, "w")
 
-                {TrieHard.get(trie, "shared"), TrieHard.auto_complete(trie, "w#{i}", 5), count,
-                 TrieHard.get(trie, "w200000") != :error}
+                {TrieHard.fetch(trie, "shared"), TrieHard.auto_complete(trie, "w#{i}", 5), count,
+                 TrieHard.fetch(trie, "w200000") != {:error, :not_found}}
               end
 
               obs =
@@ -653,7 +667,7 @@ defmodule TrieHardTest do
 
         assert Enum.any?(counts, &(&1 < 200_000)), "no read overlapped the bulk load"
         assert TrieHard.count_prefix(trie, "w") == 200_000
-        assert TrieHard.get(trie, "w200000") == {:ok, "w200000"}
+        assert TrieHard.fetch(trie, "w200000") == {:ok, "w200000"}
       end
     end
   end

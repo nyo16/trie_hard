@@ -18,7 +18,7 @@ against a trie of 100,000 `"word_<n>_suffix"` keys:
 
 | Operation | `:radix` (default) | `:sorted` |
 |---|---|---|
-| `get/2` (hit) | 0.17 µs | 0.14 µs |
+| `fetch/2` (hit) | 0.17 µs | 0.14 µs |
 | `prefix?/2` | 0.13 µs | 0.10 µs |
 | `delete/2` + `insert/3` | 0.33 µs | 0.50 µs |
 | `auto_complete/3`, 10 results | 0.61 µs | 0.95 µs |
@@ -75,8 +75,11 @@ trie = TrieHard.new()
 :ok = TrieHard.insert(trie, "cat", "feline")
 :ok = TrieHard.insert_many(trie, [{"car", %{wheels: 4}}, {"card", {:payment, :plastic}}])
 
-{:ok, "feline"} = TrieHard.get(trie, "cat")
-:error = TrieHard.get(trie, "dog")
+{:ok, "feline"} = TrieHard.fetch(trie, "cat")
+{:error, :not_found} = TrieHard.fetch(trie, "dog")
+"feline" = TrieHard.get(trie, "cat")
+nil = TrieHard.get(trie, "dog")
+:none = TrieHard.get(trie, "dog", :none)
 
 # Lexicographic order; the limit keeps the first matches in that order
 ["car", "card", "cat"] = TrieHard.auto_complete(trie, "ca", 10)
@@ -88,11 +91,11 @@ false = TrieHard.prefix?(trie, "xyz")
 3 = TrieHard.count_prefix(trie, "ca")
 
 :ok = TrieHard.delete(trie, "cat")
-:error = TrieHard.delete(trie, "cat")
+{:error, :not_found} = TrieHard.delete(trie, "cat")
 
 # Each word is stored with itself as the value
 :ok = TrieHard.add_word_list(trie, ["apple", "application", "apply"])
-{:ok, "apple"} = TrieHard.get(trie, "apple")
+"apple" = TrieHard.get(trie, "apple")
 
 # One node per key byte instead of path compression; same results for every operation
 sorted = TrieHard.new(layout: :sorted)
@@ -106,8 +109,9 @@ sorted = TrieHard.new(layout: :sorted)
 | `new/1` | an opaque trie (`TrieHard.t()`); option `layout: :radix` (default) or `:sorted` |
 | `insert/3` | `:ok` |
 | `insert_many/2` | `:ok` — inserts `{key, value}` pairs from any enumerable |
-| `get/2` | `{:ok, value}` or `:error` |
-| `delete/2` | `:ok`, or `:error` when the key was absent |
+| `fetch/2` | `{:ok, value}` or `{:error, :not_found}` |
+| `get/3` | the value, or `default` (`nil`) when missing — like `Map.get/3` |
+| `delete/2` | `:ok`, or `{:error, :not_found}` when the key was absent |
 | `prefix?/2` | `boolean` — whether any key starts with the prefix |
 | `auto_complete/3` | up to `max_results` (default 10) keys, in lexicographic order |
 | `count_prefix/2` | exact number of keys with the prefix |

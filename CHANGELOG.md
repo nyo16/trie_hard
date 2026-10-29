@@ -11,18 +11,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
-Return values no longer wrap results in `{:ok, _}` or use sentinel tuples. Internal failures
-(none are reachable) raise instead of returning `:error` tuples.
+Lookups follow `Map`: `fetch/2` returns `{:ok, value}` or `{:error, :not_found}`, and `get/3`
+returns the value or a default. Other functions return plain values instead of `{:ok, _}`
+tuples; internal failures (none are reachable) raise instead of returning `:error` tuples.
 
 | 0.2.x | 0.3.0 |
 |---|---|
-| `get(t, k)` → `{:ok, v}` \| `{:not_found, nil}` | `get(t, k)` → `{:ok, v}` \| `:error` |
+| `get(t, k)` → `{:ok, v}` \| `{:not_found, nil}` | `fetch(t, k)` → `{:ok, v}` \| `{:error, :not_found}` |
+| — | `get(t, k, default \\ nil)` → `v` \| `default` (like `Map.get/3`) |
 | `prefix_search(t, p)` → `{:ok, boolean}` | `prefix?(t, p)` → `boolean` (`prefix_search/2` removed) |
 | `auto_complete(t, p, n)` → `{:ok, [key]}` | `auto_complete(t, p, n)` → `[key]` |
 | `count_prefix(t, p)` → `{:ok, n}` | `count_prefix(t, p)` → `n` |
-| `delete(t, k)` → `:ok` always | `delete(t, k)` → `:ok` if the key existed, `:error` otherwise |
+| `delete(t, k)` → `:ok` always | `delete(t, k)` → `:ok` if the key existed, `{:error, :not_found}` otherwise |
 | `insert/3`, `add_word_list/2` → `:ok` | unchanged |
 | `@type trie :: reference()` | `@opaque t` (`TrieHard.t()`); don't rely on it being a reference |
+
+`get/2` keeps its name but now returns the value itself: code matching `{:ok, v}` on `get/2`
+must switch to `fetch/2` (or use the value directly).
 
 Migration:
 
@@ -37,10 +42,12 @@ end
 {:ok, found?} = TrieHard.prefix_search(trie, prefix)
 
 # 0.3.0
-case TrieHard.get(trie, key) do
+case TrieHard.fetch(trie, key) do
   {:ok, value} -> value
-  :error -> default
+  {:error, :not_found} -> default
 end
+# or, when stored values are never `default`:
+value = TrieHard.get(trie, key, default)
 words = TrieHard.auto_complete(trie, prefix, 5)
 count = TrieHard.count_prefix(trie, prefix)
 found? = TrieHard.prefix?(trie, prefix)
@@ -60,7 +67,7 @@ found? = TrieHard.prefix?(trie, prefix)
   `ArgumentError` from the NIF) and accepts limits beyond 64 bits.
 - A panic inside the NIF can no longer leave the trie permanently locked.
 - A string value that happened to be valid external term format is no longer decoded by
-  mistake on `get/2`.
+  mistake on lookup.
 - NIF calls no longer block normal schedulers (0.2.7 ran every call on the caller's scheduler
   under a `Mutex`; a large `count_prefix/2` or bulk load stalled it for hundreds of ms).
 
@@ -68,7 +75,7 @@ found? = TrieHard.prefix?(trie, prefix)
 
 - **Default layout is `:radix`** (path-compressed): ~12x less memory than a byte-per-node layout
   (~50 vs ~600 bytes per key for 200,000 `"word_<n>_suffix"` keys; 0.2.7 used ~2,800) and
-  faster for writes, `auto_complete/3` and `count_prefix/2`; point lookups (`get/2`,
+  faster for writes, `auto_complete/3` and `count_prefix/2`; point lookups (`fetch/2`,
   `prefix?/2`) are 20–35 ns slower than `layout: :sorted`. Results are identical in both.
 - `auto_complete/3` returns keys in lexicographic (codepoint) order, and a limit keeps the
   first matches in that order. Previously the order was arbitrary and could differ between runs.

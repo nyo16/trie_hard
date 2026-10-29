@@ -22,10 +22,12 @@ defmodule TrieHard do
       :ok
       iex> TrieHard.insert_many(trie, [{"car", %{wheels: 4}}, {"card", {"payment", "plastic"}}])
       :ok
-      iex> TrieHard.get(trie, "cat")
+      iex> TrieHard.fetch(trie, "cat")
       {:ok, :feline}
-      iex> TrieHard.get(trie, "dog")
-      :error
+      iex> TrieHard.fetch(trie, "dog")
+      {:error, :not_found}
+      iex> TrieHard.get(trie, "dog", :none)
+      :none
       iex> TrieHard.auto_complete(trie, "ca", 10)
       ["car", "card", "cat"]
       iex> TrieHard.count_prefix(trie, "car")
@@ -89,8 +91,8 @@ defmodule TrieHard do
       node, so inserts and deletes may split or merge edges. In the bundled
       benchmark it uses about a twelfth of the memory of `:sorted` (~50 vs ~600
       bytes per key for 200,000 `"word_<n>_suffix"` keys). It is faster for
-      writes, `auto_complete/3` and `count_prefix/2`; point lookups (`get/2`,
-      `prefix?/2`) are 20–35 ns slower.
+      writes, `auto_complete/3` and `count_prefix/2`; point lookups (`fetch/2`,
+      `get/3`, `prefix?/2`) are 20–35 ns slower.
     - `:sorted` stores one node per key byte with sorted child arrays; its
       structure is simpler and never splits or merges nodes.
 
@@ -156,7 +158,7 @@ defmodule TrieHard do
       iex> TrieHard.insert_many(trie, %{"a" => 1, "b" => [2]})
       :ok
       iex> TrieHard.get(trie, "b")
-      {:ok, [2]}
+      [2]
   """
   @spec insert_many(t(), Enumerable.t({key(), value()})) :: :ok
   def insert_many(trie, entries) do
@@ -174,29 +176,63 @@ defmodule TrieHard do
   end
 
   @doc """
-  Returns `{:ok, value}` for an exact key match, or `:error`.
+  Returns `{:ok, value}` for an exact key match, or `{:error, :not_found}`.
+
+  Use this when stored values may be `nil` (or your default): unlike `get/3`,
+  it tells a stored value apart from a missing key.
 
   ## Examples
 
       iex> trie = TrieHard.new()
       iex> TrieHard.insert(trie, "data", {:ok, %{id: 123}})
       :ok
-      iex> TrieHard.get(trie, "data")
+      iex> TrieHard.fetch(trie, "data")
       {:ok, {:ok, %{id: 123}}}
-      iex> TrieHard.get(trie, "missing")
-      :error
+      iex> TrieHard.insert(trie, "nothing", nil)
+      :ok
+      iex> TrieHard.fetch(trie, "nothing")
+      {:ok, nil}
+      iex> TrieHard.fetch(trie, "missing")
+      {:error, :not_found}
   """
-  @spec get(t(), key()) :: {:ok, value()} | :error
-  def get(trie, key) when is_binary(key) do
+  @spec fetch(t(), key()) :: {:ok, value()} | {:error, :not_found}
+  def fetch(trie, key) when is_binary(key) do
     case trie |> Native.get(key) |> settle(:get, :get_dirty, [trie, key]) do
       {:ok, etf} -> {:ok, :erlang.binary_to_term(etf, [:safe])}
       :self_key -> {:ok, key}
-      :not_found -> :error
+      :not_found -> {:error, :not_found}
     end
   end
 
   @doc """
-  Removes `key`. Returns `:ok` if it was present, `:error` otherwise.
+  Returns the value stored under `key`, or `default` (`nil` unless given) when
+  the key is missing.
+
+  Like `Map.get/3`, a stored `default` and a missing key look the same; use
+  `fetch/2` to tell them apart.
+
+  ## Examples
+
+      iex> trie = TrieHard.new()
+      iex> TrieHard.insert(trie, "hello", "world")
+      :ok
+      iex> TrieHard.get(trie, "hello")
+      "world"
+      iex> TrieHard.get(trie, "missing")
+      nil
+      iex> TrieHard.get(trie, "missing", "fallback")
+      "fallback"
+  """
+  @spec get(t(), key(), default) :: value() | default when default: term()
+  def get(trie, key, default \\ nil) when is_binary(key) do
+    case fetch(trie, key) do
+      {:ok, value} -> value
+      {:error, :not_found} -> default
+    end
+  end
+
+  @doc """
+  Removes `key`. Returns `:ok` if it was present, `{:error, :not_found}` otherwise.
 
   Keys that share a prefix with `key` are unaffected.
 
@@ -208,13 +244,13 @@ defmodule TrieHard do
       iex> TrieHard.delete(trie, "hello")
       :ok
       iex> TrieHard.delete(trie, "hello")
-      :error
+      {:error, :not_found}
   """
-  @spec delete(t(), key()) :: :ok | :error
+  @spec delete(t(), key()) :: :ok | {:error, :not_found}
   def delete(trie, key) when is_binary(key) do
     case trie |> Native.delete(key) |> settle(:delete, :delete_dirty, [trie, key]) do
       true -> :ok
-      false -> :error
+      false -> {:error, :not_found}
     end
   end
 
@@ -279,7 +315,7 @@ defmodule TrieHard do
       iex> TrieHard.add_word_list(trie, ["cat", "car", "card"])
       :ok
       iex> TrieHard.get(trie, "cat")
-      {:ok, "cat"}
+      "cat"
   """
   @spec add_word_list(t(), Enumerable.t(String.t())) :: :ok
   def add_word_list(trie, words) do

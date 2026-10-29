@@ -46,8 +46,10 @@ Benchee.run(
       :ok = TrieHard.delete(trie, "word_54321_suffix")
       :ok = TrieHard.insert(trie, "word_54321_suffix", 1)
     end,
-    "get/2 hit" => fn {_, trie} -> {:ok, _} = TrieHard.get(trie, "word_54321_suffix") end,
-    "get/2 miss" => fn {_, trie} -> :error = TrieHard.get(trie, "word_54321_suffiy") end,
+    "fetch/2 hit" => fn {_, trie} -> {:ok, _} = TrieHard.fetch(trie, "word_54321_suffix") end,
+    "fetch/2 miss" => fn {_, trie} ->
+      {:error, :not_found} = TrieHard.fetch(trie, "word_54321_suffiy")
+    end,
     "prefix?/2" => fn {_, trie} -> true = TrieHard.prefix?(trie, "word_5432") end,
     "auto_complete/3 10" => fn {_, trie} -> TrieHard.auto_complete(trie, "word_1", 10) end,
     "auto_complete/3 100" => fn {_, trie} -> TrieHard.auto_complete(trie, "word_1", 100) end,
