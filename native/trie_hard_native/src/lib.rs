@@ -15,6 +15,7 @@ mod atoms {
         not_found,
         self_key,
         dirty,
+        busy,
         sorted,
         radix,
     }
@@ -33,7 +34,8 @@ const FAST_BYTE_BUDGET: usize = 64 * 1024;
 /// How a NIF may wait for the trie lock.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Mode {
-    /// Normal scheduler: never block; return `:dirty` when contended or over budget.
+    /// Normal scheduler: never block. Returns `:busy` when the lock is
+    /// contended and `:dirty` when the work exceeds the fast-path bounds.
     Fast,
     /// Dirty CPU scheduler: block on the lock, no budget.
     Blocking,
@@ -85,8 +87,15 @@ impl TrieResource {
     }
 }
 
+/// The work exceeds the fast-path bounds: the caller retries the dirty twin.
 fn dirty(env: Env<'_>) -> Term<'_> {
     atoms::dirty().encode(env)
+}
+
+/// The lock is held by a writer (or a writer is queued): the caller yields
+/// and retries the fast NIF, so waiting never occupies a dirty scheduler.
+fn busy(env: Env<'_>) -> Term<'_> {
+    atoms::busy().encode(env)
 }
 
 /// Keys arrive as raw binaries so the size gate runs before UTF-8
@@ -142,9 +151,9 @@ fn insert_impl<'a>(
     if mode.too_large(etf.len(), FAST_MAX_VALUE_BYTES) {
         return Ok(dirty(env));
     }
-    let value = Value::Etf(etf.as_slice().into());
+    let value = Value::etf(etf.as_slice());
     let Some(mut guard) = trie.write(mode) else {
-        return Ok(dirty(env));
+        return Ok(busy(env));
     };
     Ok(match guard.insert(key, value, mode.budget()) {
         Ok(()) => atoms::ok().encode(env),
@@ -180,15 +189,17 @@ fn get_impl<'a>(env: Env<'a>, trie: &TrieResource, key: Binary, mode: Mode) -> N
     // Clone the Arc under the read lock; copy the bytes after releasing it.
     let value = match trie.read(mode) {
         Some(guard) => guard.get(key).cloned(),
-        None => return Ok(dirty(env)),
+        None => return Ok(busy(env)),
     };
-    Ok(match value {
-        None => atoms::not_found().encode(env),
-        Some(Value::SelfKey) => atoms::self_key().encode(env),
-        Some(Value::Etf(bytes)) if mode.too_large(bytes.len(), FAST_MAX_VALUE_BYTES) => dirty(env),
-        Some(Value::Etf(bytes)) => {
+    let Some(value) = value else {
+        return Ok(atoms::not_found().encode(env));
+    };
+    Ok(match value.etf_bytes() {
+        None => atoms::self_key().encode(env),
+        Some(bytes) if mode.too_large(bytes.len(), FAST_MAX_VALUE_BYTES) => dirty(env),
+        Some(bytes) => {
             let mut binary = NewBinary::new(env, bytes.len());
-            binary.as_mut_slice().copy_from_slice(&bytes);
+            binary.as_mut_slice().copy_from_slice(bytes);
             (atoms::ok(), Binary::from(binary)).encode(env)
         }
     })
@@ -219,7 +230,7 @@ fn delete_impl<'a>(
         return Ok(dirty(env));
     };
     let Some(mut guard) = trie.write(mode) else {
-        return Ok(dirty(env));
+        return Ok(busy(env));
     };
     Ok(match guard.delete(key, mode.budget()) {
         Ok(existed) => existed.encode(env),
@@ -252,7 +263,7 @@ fn prefix_search_impl<'a>(
     };
     Ok(match trie.read(mode) {
         Some(guard) => guard.has_prefix(prefix).encode(env),
-        None => dirty(env),
+        None => busy(env),
     })
 }
 
@@ -286,7 +297,7 @@ fn auto_complete_impl<'a>(
     };
     let results = match trie.read(mode) {
         Some(guard) => guard.complete(prefix, max_results, mode.budget()),
-        None => return Ok(dirty(env)),
+        None => return Ok(busy(env)),
     };
     Ok(match results {
         Ok(words) => encode_words(env, &words),
@@ -325,7 +336,7 @@ fn count_prefix_impl<'a>(
     };
     let count = match trie.read(mode) {
         Some(guard) => guard.count(prefix, mode.budget()),
-        None => return Ok(dirty(env)),
+        None => return Ok(busy(env)),
     };
     Ok(match count {
         Ok(count) => count.encode(env),
@@ -357,7 +368,7 @@ fn count_prefix_dirty<'a>(
 fn insert_many(trie: ResourceArc<TrieResource>, pairs: Vec<(&str, Binary)>) -> Atom {
     let entries: Vec<(&str, Value)> = pairs
         .into_iter()
-        .map(|(key, etf)| (key, Value::Etf(etf.as_slice().into())))
+        .map(|(key, etf)| (key, Value::etf(etf.as_slice())))
         .collect();
     let mut guard = trie.trie.write().unwrap_or_else(PoisonError::into_inner);
     for (key, value) in entries {
@@ -371,7 +382,7 @@ fn insert_many(trie: ResourceArc<TrieResource>, pairs: Vec<(&str, Binary)>) -> A
 fn add_word_list(trie: ResourceArc<TrieResource>, words: Vec<&str>) -> Atom {
     let mut guard = trie.trie.write().unwrap_or_else(PoisonError::into_inner);
     for word in words {
-        insert_unlimited(&mut guard, word, Value::SelfKey);
+        insert_unlimited(&mut guard, word, Value::self_key());
     }
     atoms::ok()
 }
@@ -413,7 +424,7 @@ mod tests {
         let poisoner = std::sync::Arc::clone(&trie);
         let result = std::thread::spawn(move || {
             let mut guard = poisoner.write(Mode::Blocking).unwrap();
-            insert_unlimited(&mut guard, "k", Value::SelfKey);
+            insert_unlimited(&mut guard, "k", Value::self_key());
             panic!("poison the lock");
         })
         .join();

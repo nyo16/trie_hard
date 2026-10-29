@@ -35,15 +35,20 @@ defmodule TrieHard do
 
   A trie can be shared by any number of processes. Reads run concurrently and
   writes are exclusive (a read-write lock). Each call first runs on the calling
-  scheduler without blocking; when the trie is locked by a writer, the key is
-  longer than 4 KiB, the value is larger than 64 KiB, or the operation would
-  visit more than 10,000 nodes or copy more than 64 KiB of keys (results, or an
-  edge split/merged in the `:radix` layout), it is transparently retried on a
-  dirty CPU scheduler. `add_word_list/2` and `insert_many/2` always run on a
-  dirty scheduler, in chunks of 1,000 entries.
+  scheduler without blocking:
 
-  While a long write holds the lock, readers wait on dirty schedulers. Bound
-  key lengths for untrusted input: a single huge key makes its write long.
+  - when the key is longer than 4 KiB, the value is larger than 64 KiB, or the
+    operation would visit more than 10,000 nodes or copy more than 64 KiB of
+    keys (results, or an edge split/merged in the `:radix` layout), it is
+    retried on a dirty CPU scheduler;
+  - when a writer holds the lock, the calling process yields and retries
+    (sleeping 1 ms between later attempts), so waiting does not occupy dirty
+    schedulers; after about 50 ms it waits on a dirty scheduler instead.
+
+  `add_word_list/2` and `insert_many/2` always run on a dirty scheduler, in
+  chunks of at most 1,000 entries or 1 MiB of keys and values, so no bulk call
+  holds the write lock for long. Bound key lengths for untrusted input: a
+  single huge key makes its own write long.
 
   Values are encoded with `:erlang.term_to_binary/1` and decoded with
   `:erlang.binary_to_term/2` (`[:safe]`) in the calling process, never inside
@@ -66,8 +71,13 @@ defmodule TrieHard do
 
   @layouts [:sorted, :radix]
 
-  # Entries per bulk NIF call; bounds how long the write lock is held.
+  # Bounds on each bulk NIF call (whichever is hit first), which bound how long
+  # the write lock is held and so how long readers wait.
   @chunk_size 1_000
+  @chunk_bytes 1_048_576
+
+  # auto_complete limits decode as a u64 in the NIF.
+  @max_results_cap 0xFFFF_FFFF_FFFF_FFFF
 
   @doc """
   Creates a new empty trie.
@@ -77,10 +87,10 @@ defmodule TrieHard do
   - `:layout` - `:radix` (default) or `:sorted`.
     - `:radix` is path-compressed: a run of bytes without branches is a single
       node, so inserts and deletes may split or merge edges. In the bundled
-      benchmark it uses about a tenth of the memory of `:sorted` (60–80 vs 764
+      benchmark it uses about a twelfth of the memory of `:sorted` (~50 vs ~600
       bytes per key for 200,000 `"word_<n>_suffix"` keys). It is faster for
       writes, `auto_complete/3` and `count_prefix/2`; point lookups (`get/2`,
-      `prefix?/2`) are 8–15 ns slower.
+      `prefix?/2`) are 20–35 ns slower.
     - `:sorted` stores one node per key byte with sorted child arrays; its
       structure is simpler and never splits or merges nodes.
 
@@ -127,20 +137,18 @@ defmodule TrieHard do
   def insert(trie, key, value) when is_binary(key) do
     etf = :erlang.term_to_binary(value)
 
-    trie
-    |> Native.insert(key, etf)
-    |> fast_or_dirty(fn -> Native.insert_dirty(trie, key, etf) end)
+    trie |> Native.insert(key, etf) |> settle(:insert, :insert_dirty, [trie, key, etf])
   end
 
   @doc """
   Inserts every `{key, value}` pair from `entries` (any enumerable).
 
   Later pairs win over earlier ones with the same key. Pairs are sent to the NIF
-  in chunks of #{@chunk_size}, so the write lock is never held for long. The
-  operation is not atomic: an invalid element (not a `{binary, term}` tuple, or
-  a key that is not UTF-8) raises `ArgumentError`; earlier chunks stay inserted,
-  while entries in the invalid element's chunk, including those before it, are
-  not inserted.
+  in chunks of at most #{@chunk_size} pairs or 1 MiB, so the write lock is never
+  held for long. The operation is not atomic: an invalid element (not a
+  `{binary, term}` tuple, or a key that is not UTF-8) raises `ArgumentError`;
+  earlier chunks stay inserted, while entries in the invalid element's chunk,
+  including those before it, are not inserted.
 
   ## Examples
 
@@ -154,7 +162,7 @@ defmodule TrieHard do
   def insert_many(trie, entries) do
     entries
     |> Stream.map(&encode_entry/1)
-    |> Stream.chunk_every(@chunk_size)
+    |> chunk(fn {key, etf} -> byte_size(key) + byte_size(etf) end)
     |> Enum.each(&Native.insert_many(trie, &1))
   end
 
@@ -180,10 +188,7 @@ defmodule TrieHard do
   """
   @spec get(t(), key()) :: {:ok, value()} | :error
   def get(trie, key) when is_binary(key) do
-    trie
-    |> Native.get(key)
-    |> fast_or_dirty(fn -> Native.get_dirty(trie, key) end)
-    |> case do
+    case trie |> Native.get(key) |> settle(:get, :get_dirty, [trie, key]) do
       {:ok, etf} -> {:ok, :erlang.binary_to_term(etf, [:safe])}
       :self_key -> {:ok, key}
       :not_found -> :error
@@ -207,10 +212,10 @@ defmodule TrieHard do
   """
   @spec delete(t(), key()) :: :ok | :error
   def delete(trie, key) when is_binary(key) do
-    trie
-    |> Native.delete(key)
-    |> fast_or_dirty(fn -> Native.delete_dirty(trie, key) end)
-    |> if(do: :ok, else: :error)
+    case trie |> Native.delete(key) |> settle(:delete, :delete_dirty, [trie, key]) do
+      true -> :ok
+      false -> :error
+    end
   end
 
   @doc """
@@ -230,7 +235,7 @@ defmodule TrieHard do
   def prefix?(trie, prefix) when is_binary(prefix) do
     trie
     |> Native.prefix_search(prefix)
-    |> fast_or_dirty(fn -> Native.prefix_search_dirty(trie, prefix) end)
+    |> settle(:prefix_search, :prefix_search_dirty, [trie, prefix])
   end
 
   @doc """
@@ -252,19 +257,21 @@ defmodule TrieHard do
   @spec auto_complete(t(), String.t(), non_neg_integer()) :: [String.t()]
   def auto_complete(trie, prefix, max_results \\ 10)
       when is_binary(prefix) and is_integer(max_results) and max_results >= 0 do
+    limit = min(max_results, @max_results_cap)
+
     trie
-    |> Native.auto_complete(prefix, max_results)
-    |> fast_or_dirty(fn -> Native.auto_complete_dirty(trie, prefix, max_results) end)
+    |> Native.auto_complete(prefix, limit)
+    |> settle(:auto_complete, :auto_complete_dirty, [trie, prefix, limit])
   end
 
   @doc """
-  Inserts each word with itself as the value.
+  Inserts each word from `words` (any enumerable) with itself as the value.
 
-  Words are sent to the NIF in chunks of #{@chunk_size} so the write lock is never
-  held for long; readers interleave between chunks. The operation is not atomic:
-  if an element is not a UTF-8 binary, `ArgumentError` is raised; earlier chunks
-  stay inserted, while words in the invalid element's chunk, including those
-  before it, are not inserted.
+  Words are sent to the NIF in chunks of at most #{@chunk_size} words or 1 MiB,
+  so the write lock is never held for long; readers interleave between chunks.
+  The operation is not atomic: if an element is not a UTF-8 binary,
+  `ArgumentError` is raised; earlier chunks stay inserted, while words in the
+  invalid element's chunk, including those before it, are not inserted.
 
   ## Examples
 
@@ -274,11 +281,35 @@ defmodule TrieHard do
       iex> TrieHard.get(trie, "cat")
       {:ok, "cat"}
   """
-  @spec add_word_list(t(), [String.t()]) :: :ok
-  def add_word_list(trie, words) when is_list(words) do
+  @spec add_word_list(t(), Enumerable.t(String.t())) :: :ok
+  def add_word_list(trie, words) do
     words
-    |> Stream.chunk_every(@chunk_size)
+    |> chunk(fn word -> if is_binary(word), do: byte_size(word), else: 0 end)
     |> Enum.each(&Native.add_word_list(trie, &1))
+  end
+
+  # Groups entries into chunks of at most @chunk_size entries or @chunk_bytes
+  # bytes (a single larger entry is its own chunk).
+  defp chunk(entries, size_fun) do
+    Stream.chunk_while(
+      entries,
+      {[], 0, 0},
+      fn entry, {acc, count, bytes} ->
+        acc = [entry | acc]
+        count = count + 1
+        bytes = bytes + size_fun.(entry)
+
+        if count >= @chunk_size or bytes >= @chunk_bytes do
+          {:cont, Enum.reverse(acc), {[], 0, 0}}
+        else
+          {:cont, {acc, count, bytes}}
+        end
+      end,
+      fn
+        {[], _, _} -> {:cont, {[], 0, 0}}
+        {acc, _, _} -> {:cont, Enum.reverse(acc), {[], 0, 0}}
+      end
+    )
   end
 
   @doc """
@@ -298,12 +329,31 @@ defmodule TrieHard do
   def count_prefix(trie, prefix) when is_binary(prefix) do
     trie
     |> Native.count_prefix(prefix)
-    |> fast_or_dirty(fn -> Native.count_prefix_dirty(trie, prefix) end)
+    |> settle(:count_prefix, :count_prefix_dirty, [trie, prefix])
   end
 
-  # Fast NIFs run on the calling (normal) scheduler and return `:dirty` instead of
-  # blocking on a contended lock or doing unbounded work; the twin runs on a dirty
-  # CPU scheduler.
-  defp fast_or_dirty(:dirty, dirty_fun), do: dirty_fun.()
-  defp fast_or_dirty(result, _dirty_fun), do: result
+  # Fast NIFs run on the calling (normal) scheduler and never block:
+  #
+  #   * `:dirty` - the work exceeds the fast-path bounds; run the twin on a
+  #     dirty CPU scheduler.
+  #   * `:busy` - a writer holds the lock; yield, then retry the fast NIF, so
+  #     waiting readers don't occupy dirty schedulers (which the writer's own
+  #     bulk calls need). Only after ~50 ms of retries fall back to the
+  #     blocking twin.
+  @busy_yields 16
+  @busy_retries 64
+
+  # The fast NIF is called directly by each function; only the rare `:dirty` /
+  # `:busy` outcomes go through a dynamic `apply/3`.
+  defp settle(result, fast, dirty, args, attempt \\ 0)
+
+  defp settle(:dirty, _fast, dirty, args, _attempt), do: apply(Native, dirty, args)
+
+  defp settle(:busy, fast, dirty, args, attempt) when attempt < @busy_retries do
+    if attempt < @busy_yields, do: :erlang.yield(), else: Process.sleep(1)
+    settle(apply(Native, fast, args), fast, dirty, args, attempt + 1)
+  end
+
+  defp settle(:busy, _fast, dirty, args, _attempt), do: apply(Native, dirty, args)
+  defp settle(result, _fast, _dirty, _args, _attempt), do: result
 end

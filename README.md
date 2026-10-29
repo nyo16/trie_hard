@@ -5,7 +5,7 @@ A fast, memory-efficient trie (prefix tree) for Elixir with autocomplete, implem
 ## Features
 
 - **Fast**: sub-microsecond lookups, prefix checks and 10-result autocompletes
-- **Compact**: path-compressed (radix) layout by default, ~60–80 bytes per key in the benchmark below
+- **Compact**: path-compressed (radix) layout by default, ~50 bytes per key in the benchmark below
 - **Deterministic**: `auto_complete` returns keys in lexicographic (codepoint) order
 - **Unicode**: keys are UTF-8 strings, including emoji and combining characters
 - **Any value**: store any Erlang term
@@ -18,23 +18,23 @@ against a trie of 100,000 `"word_<n>_suffix"` keys:
 
 | Operation | `:radix` (default) | `:sorted` |
 |---|---|---|
-| `get/2` (hit) | 0.15 µs | 0.14 µs |
-| `prefix?/2` | 0.11 µs | 0.10 µs |
-| `delete/2` + `insert/3` | 0.30 µs | 0.50 µs |
-| `auto_complete/3`, 10 results | 0.58 µs | 0.98 µs |
-| `auto_complete/3`, 100 results | 2.5 µs | 6.4 µs |
-| `count_prefix/2`, 111 matches | 0.24 µs | 1.2 µs |
-| `count_prefix/2`, 11,112 matches | 24 µs | 149 µs |
-| `insert/3`, per key (1,000 into a new trie) | 0.15 µs | 0.41 µs |
-| `insert_many/2`, per key | 0.15 µs | 0.42 µs |
-| `add_word_list/2`, per key | 0.09 µs | 0.37 µs |
+| `get/2` (hit) | 0.17 µs | 0.14 µs |
+| `prefix?/2` | 0.13 µs | 0.10 µs |
+| `delete/2` + `insert/3` | 0.33 µs | 0.50 µs |
+| `auto_complete/3`, 10 results | 0.61 µs | 0.95 µs |
+| `auto_complete/3`, 100 results | 2.6 µs | 6.0 µs |
+| `count_prefix/2`, 111 matches | 0.26 µs | 0.99 µs |
+| `count_prefix/2`, 11,112 matches | 27 µs | 142 µs |
+| `insert/3`, per key (1,000 into a new trie) | 0.16 µs | 0.43 µs |
+| `insert_many/2`, per key | 0.16 µs | 0.41 µs |
+| `add_word_list/2`, per key | 0.10 µs | 0.38 µs |
 
 Memory per key (RSS delta for 200,000 keys, fresh VM per layout):
 
 | Keys | `:radix` | `:sorted` |
 |---|---|---|
-| `"word_<n>_suffix"` | 59–78 B | 764 B |
-| `"https://example.com/users/<n>/profile/settings"` | 131–165 B | 2,074 B |
+| `"word_<n>_suffix"` | 47–53 B | 592–618 B |
+| `"https://example.com/users/<n>/profile/settings"` | 37–54 B | 1,622–1,639 B |
 
 Ranges are the spread over repeated runs (small RSS deltas are noisy).
 
@@ -120,18 +120,23 @@ always raises `ArgumentError`.
 ## Concurrency
 
 A trie can be shared between processes. Reads run concurrently; writes are exclusive. Every
-operation first runs on the calling scheduler without blocking; if the trie is locked by a writer,
-the key is longer than 4 KiB, the value larger than 64 KiB, or the operation would visit more than
-10,000 nodes or copy more than 64 KiB of key bytes (results, or a `:radix` edge split/merge), it is
-retried on a dirty CPU scheduler, so normal schedulers are never blocked.
+operation first runs on the calling scheduler without blocking:
+
+- if the key is longer than 4 KiB, the value larger than 64 KiB, or the operation would visit more
+  than 10,000 nodes or copy more than 64 KiB of key bytes (results, or a `:radix` edge split/merge),
+  it is retried on a dirty CPU scheduler;
+- if a writer holds the lock, the calling process yields and retries (sleeping 1 ms between later
+  attempts), so waiting readers don't occupy the dirty schedulers the writer needs; after about
+  50 ms it waits on a dirty scheduler instead.
+
+Normal schedulers are never blocked.
 
 `add_word_list/2` and `insert_many/2` always run on a dirty scheduler and send their input in
-chunks of 1,000 entries, so readers interleave with large bulk loads. They are not atomic: an
-invalid element raises `ArgumentError`; earlier chunks remain inserted, while entries in the
-invalid element's chunk (including those before it) are not inserted.
+chunks of at most 1,000 entries or 1 MiB, so readers interleave with large bulk loads. They are not
+atomic: an invalid element raises `ArgumentError`; earlier chunks remain inserted, while entries in
+the invalid element's chunk (including those before it) are not inserted.
 
-While a long write holds the lock, readers wait on dirty schedulers. Bound key lengths for
-untrusted input: one huge key makes its write long.
+Bound key lengths for untrusted input: one huge key makes its own write long.
 
 ## Memory
 

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.3.0] - Unreleased
 
+0.2.8 and 0.2.9 were prepared but never published; everything since 0.2.7 ships in 0.3.0.
+
 ### Breaking changes
 
 Return values no longer wrap results in `{:ok, _}` or use sentinel tuples. Internal failures
@@ -44,84 +46,67 @@ count = TrieHard.count_prefix(trie, prefix)
 found? = TrieHard.prefix?(trie, prefix)
 ```
 
-### Changed
-
-- **Default layout is `:radix`** (path-compressed). In the bundled benchmark it uses ~10x less
-  memory than the 0.2.9 layout (60–80 vs 764 bytes per key for 200,000 `"word_<n>_suffix"` keys)
-  and is faster for writes, `auto_complete/3` and `count_prefix/2`; point lookups (`get/2`,
-  `prefix?/2`) are 8–15 ns slower.
-  `TrieHard.new(layout: :sorted)` keeps the 0.2.9 structure. Results are identical.
-
-### Added
-
-- `new/1` with `layout: :radix | :sorted`. Unknown options or layouts raise `ArgumentError`.
-- `insert_many/2`: inserts `{key, value}` pairs from any enumerable, in chunks of 1,000 on a dirty
-  scheduler; not atomic (an invalid element raises `ArgumentError`; earlier chunks stay inserted,
-  entries in its chunk are not).
-
-### Fixed
-
-- Fast (normal-scheduler) calls also hand off to a dirty scheduler when they would copy more
-  than 64 KiB of key bytes (long stored keys in `auto_complete/3`, radix edge splits/merges),
-  not only after 10,000 node visits. Key size is checked before UTF-8 validation, so a huge
-  key is no longer scanned on a normal scheduler.
-
-## [0.2.9] - Unreleased
-
-### Changed
-
-- `auto_complete/3` returns keys in lexicographic (codepoint) order, and a limit keeps the
-  first matches in that order. Previously the order was arbitrary and could differ between runs.
-- Nodes are byte-keyed with sorted child arrays instead of per-character hash maps:
-  memory per key drops from ~2,800 to ~760 bytes (200,000-key benchmark).
-- Reads run concurrently (`RwLock` instead of `Mutex`). Calls never block a normal scheduler:
-  when the trie is locked, the key exceeds 4 KiB, the value exceeds 64 KiB, or a traversal
-  exceeds 10,000 node visits, the call is retried on a dirty CPU scheduler.
-- `add_word_list/2` runs on a dirty scheduler and sends the list in chunks of 1,000 words, so
-  readers interleave with bulk loads. It is not atomic: a non-UTF-8 or non-binary element raises
-  `ArgumentError` and earlier chunks stay inserted.
-- Values are always stored in external term format, encoded and decoded in Elixir
-  (`binary_to_term/2` with `:safe`). A string value that happened to be valid external term
-  format is no longer decoded by mistake on `get/2`.
-- Minimum `rustler_precompiled` is 0.10 (drops the `castore` dependency); `rustler` (optional)
-  is `~> 0.37`.
-- Precompiled NIF versions are 2.16 and 2.17; 2.15 is dropped (unused by OTP 26+).
-- The Hex package now includes the NIF sources, so `TRIE_HARD_BUILD=true` works for Hex installs.
-- Release artifacts are built by a read-only job and attested in a separate publish job;
-  `scripts/release.sh` verifies attestations before generating checksums.
-
-### Removed
-
-- The wall-clock `:benchmark` test module; use `bench/trie_bench.exs` (`MIX_ENV=bench`).
-
-## [0.2.8] - 2026-10-28
-
 ### Fixed
 
 - `delete/2` no longer panics on keys containing non-ASCII characters (e.g. `"café"`, `"🦀"`);
   a panic previously also poisoned the trie so every later call returned `:error`.
-  Deletion is now iterative and linear in the key length.
+  Deletion is iterative and linear in the key length.
 - Very long keys (10,000+ characters) no longer overflow the scheduler stack in
   `auto_complete/3`, `count_prefix/2`, `delete/2`, or when the trie is garbage collected
   (previously crashed the VM with SIGBUS).
 - `count_prefix/2` returns the exact count; it was capped at 64.
-- `prefix_search(trie, "")` returns `{:ok, false}` on an empty trie.
-- `auto_complete/3` raises `FunctionClauseError` for a negative `max_results` instead of
-  an `ArgumentError` from the NIF.
+- `prefix?/2` (formerly `prefix_search/2`) is false on an empty trie, including for `""`.
+- `auto_complete/3` raises `FunctionClauseError` for a negative `max_results` (was an
+  `ArgumentError` from the NIF) and accepts limits beyond 64 bits.
 - A panic inside the NIF can no longer leave the trie permanently locked.
-
-### Removed
-
-- `legacy_cpu` precompiled artifact variants and the `TRIE_HARD_USE_LEGACY_ARTIFACTS`
-  environment variable / `:use_legacy_artifacts` config. x86_64 artifacts now target
-  baseline x86-64 and run on every x86_64 CPU; the CPU detection that selected the
-  variant never worked.
+- A string value that happened to be valid external term format is no longer decoded by
+  mistake on `get/2`.
+- NIF calls no longer block normal schedulers (0.2.7 ran every call on the caller's scheduler
+  under a `Mutex`; a large `count_prefix/2` or bulk load stalled it for hundreds of ms).
 
 ### Changed
 
-- Precompiled NIFs are built with a pinned Rust toolchain (`rust-toolchain.toml`,
-  1.97.1); the crate declares MSRV 1.91.
-- macOS artifacts are built on `macos-15` runners (`macos-13` was retired).
+- **Default layout is `:radix`** (path-compressed): ~12x less memory than a byte-per-node layout
+  (~50 vs ~600 bytes per key for 200,000 `"word_<n>_suffix"` keys; 0.2.7 used ~2,800) and
+  faster for writes, `auto_complete/3` and `count_prefix/2`; point lookups (`get/2`,
+  `prefix?/2`) are 20–35 ns slower than `layout: :sorted`. Results are identical in both.
+- `auto_complete/3` returns keys in lexicographic (codepoint) order, and a limit keeps the
+  first matches in that order. Previously the order was arbitrary and could differ between runs.
+- Concurrency: reads run concurrently (`RwLock` instead of `Mutex`). Each call runs on the
+  caller's scheduler without blocking. Calls whose key exceeds 4 KiB, value exceeds 64 KiB, or
+  that would visit more than 10,000 nodes or copy more than 64 KiB move to a dirty CPU scheduler.
+  Calls that find the lock held by a writer yield and retry (about 50 ms) before waiting on a
+  dirty scheduler, so waiting readers don't starve bulk writers of dirty schedulers.
+- `add_word_list/2` runs on a dirty scheduler in chunks of at most 1,000 words or 1 MiB, so
+  readers interleave with bulk loads, and accepts any enumerable. It is not atomic: an invalid
+  element raises `ArgumentError`; earlier chunks stay inserted, words in its chunk are not.
+- Values are always stored in external term format, encoded and decoded in Elixir
+  (`binary_to_term/2` with `:safe`).
+- Minimum `rustler_precompiled` is 0.10 (drops the `castore` dependency); `rustler` (optional)
+  is `~> 0.37`.
+- Precompiled NIF versions are 2.16 and 2.17; 2.15 is dropped (unused by OTP 26+).
+- The Hex package includes the NIF sources, so `TRIE_HARD_BUILD=true` works for Hex installs.
+- Precompiled NIFs are built with a pinned Rust toolchain (`rust-toolchain.toml`, 1.97.1) by a
+  vendored build script, with `cross` installed from a hash-verified release and its images
+  pinned by digest; macOS artifacts are built on `macos-15` (`macos-13` was retired).
+  Artifacts are attested in a separate publish job, and `scripts/release.sh` publishes only a
+  checksum file that matches the attested bytes of the tagged release workflow.
+- The crate declares MSRV 1.91.
+
+### Added
+
+- `new/1` with `layout: :radix | :sorted`. Unknown options or layouts raise `ArgumentError`.
+- `insert_many/2`: inserts `{key, value}` pairs from any enumerable, in chunks of at most 1,000
+  pairs or 1 MiB on a dirty scheduler; not atomic (an invalid element raises `ArgumentError`;
+  earlier chunks stay inserted, entries in its chunk are not).
+
+### Removed
+
+- `prefix_search/2` (replaced by `prefix?/2`, see above).
+- `legacy_cpu` precompiled artifact variants and the `TRIE_HARD_USE_LEGACY_ARTIFACTS`
+  environment variable / `:use_legacy_artifacts` config. x86_64 artifacts target baseline
+  x86-64 and run on every x86_64 CPU; the CPU detection that selected the variant never worked.
+- The wall-clock `:benchmark` test module; use `bench/trie_bench.exs` (`MIX_ENV=bench`).
 
 ## [0.2.7] - 2025-09-23
 
@@ -194,7 +179,7 @@ If upgrading from 0.1.0:
 - Batch operations: `add_word_list/2` for efficient bulk insertions
 - Thread-safe concurrent access with Rust's safety guarantees
 - Full Unicode support including emojis
-- Benchmarks (measured on a debug NIF build; superseded by the release-build numbers in the README since 0.2.9):
+- Benchmarks (measured on a debug NIF build; superseded by the release-build numbers in the README since 0.3.0):
   - Insert: 0.66μs per word (individual), 0.59μs per word (batch)
   - Lookup: 2μs
   - Autocomplete: 155μs for 100 results
@@ -206,7 +191,7 @@ If upgrading from 0.1.0:
 ### Technical Details
 
 - Requires Rust nightly toolchain for edition 2024 support (no longer true: stable Rust, edition 2021,
-  MSRV 1.91 since 0.2.8)
+  MSRV 1.91 since 0.3.0)
 - Built with Rustler for seamless Elixir-Rust integration
 - Uses `trie_hard_rs` v0.1.0 for core trie functionality (removed in 0.2.x)
 - Elixir 1.18+ compatibility

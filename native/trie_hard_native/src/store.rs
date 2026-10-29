@@ -146,8 +146,9 @@ mod tests {
         }
 
         fn check_invariants(&self) {
-            if let Store::Radix(trie) = self {
-                trie.check_invariants();
+            match self {
+                Store::Sorted(trie) => trie.check_invariants(),
+                Store::Radix(trie) => trie.check_invariants(),
             }
         }
     }

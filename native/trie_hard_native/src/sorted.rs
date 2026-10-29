@@ -241,6 +241,24 @@ mod tests {
             }
             count
         }
+
+        /// Structural invariants: edge bytes sorted and unique, one child per
+        /// edge byte, and no valueless leaf below the root (delete prunes them).
+        pub(crate) fn check_invariants(&self) {
+            let mut stack: Vec<(&Node<T>, bool)> = vec![(&self.root, true)];
+            while let Some((node, is_root)) = stack.pop() {
+                assert_eq!(node.keys.len(), node.children.len());
+                assert!(
+                    node.keys.windows(2).all(|w| w[0] < w[1]),
+                    "edge bytes unsorted"
+                );
+                assert!(
+                    is_root || node.value.is_some() || !node.children.is_empty(),
+                    "valueless leaf"
+                );
+                stack.extend(node.children.iter().map(|child| (child, false)));
+            }
+        }
     }
 
     fn words(results: Result<Vec<Vec<u8>>, OverBudget>) -> Vec<String> {
@@ -380,7 +398,7 @@ mod tests {
         }
         assert_eq!(trie.complete(b"ca", 0, UNLIMITED), Ok(vec![]));
         assert_eq!(words(trie.complete(b"car", 2, UNLIMITED)), ["car", "card"]);
-        // "caf" < "car" bytewise; "é" sorts after every ASCII letter.
+        // "caf" < "car" bytewise.
         assert_eq!(
             words(trie.complete(b"ca", 10, UNLIMITED)),
             ["café", "car", "card", "care", "cat"]

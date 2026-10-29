@@ -13,6 +13,21 @@ defmodule TrieHardTest do
     end
   end
 
+  describe "invalid handles" do
+    test "a handle that is not a trie raises ArgumentError in every NIF-backed function" do
+      for handle <- [make_ref(), nil, :trie] do
+        assert_raise ArgumentError, fn -> TrieHard.get(handle, "k") end
+        assert_raise ArgumentError, fn -> TrieHard.insert(handle, "k", 1) end
+        assert_raise ArgumentError, fn -> TrieHard.delete(handle, "k") end
+        assert_raise ArgumentError, fn -> TrieHard.prefix?(handle, "k") end
+        assert_raise ArgumentError, fn -> TrieHard.auto_complete(handle, "k") end
+        assert_raise ArgumentError, fn -> TrieHard.count_prefix(handle, "k") end
+        assert_raise ArgumentError, fn -> TrieHard.add_word_list(handle, ["k"]) end
+        assert_raise ArgumentError, fn -> TrieHard.insert_many(handle, [{"k", 1}]) end
+      end
+    end
+  end
+
   describe "layout cross-check" do
     test "both layouts return identical results for the same operation sequence" do
       :rand.seed(:exsss, {20, 26, 10})
@@ -21,25 +36,27 @@ defmodule TrieHardTest do
       random_key = fn -> Enum.map_join(1..:rand.uniform(6), fn _ -> Enum.random(alphabet) end) end
       tries = Enum.map(@layouts, &TrieHard.new(layout: &1))
 
-      for _ <- 1..3_000 do
+      for step <- 1..3_000 do
         key = random_key.()
 
-        call =
-          case :rand.uniform(6) do
-            1 -> &TrieHard.insert(&1, key, key)
-            2 -> &TrieHard.delete(&1, key)
-            3 -> &TrieHard.get(&1, key)
-            4 -> &TrieHard.count_prefix(&1, key)
-            5 -> &TrieHard.prefix?(&1, key)
-            6 -> &TrieHard.auto_complete(&1, String.slice(key, 0, 2), 5)
+        {op, call} =
+          case :rand.uniform(7) do
+            1 -> {:insert, &TrieHard.insert(&1, key, step)}
+            2 -> {:delete, &TrieHard.delete(&1, key)}
+            3 -> {:get, &TrieHard.get(&1, key)}
+            4 -> {:count_prefix, &TrieHard.count_prefix(&1, key)}
+            5 -> {:prefix?, &TrieHard.prefix?(&1, key)}
+            6 -> {:auto_complete, &TrieHard.auto_complete(&1, String.slice(key, 0, 2), 5)}
+            7 -> {:add_word_list, &TrieHard.add_word_list(&1, [key, "", String.reverse(key)])}
           end
 
         [sorted, radix] = Enum.map(tries, call)
-        assert sorted == radix
+        assert sorted == radix, "step #{step}: #{op}(#{inspect(key)}) diverged"
       end
 
       [sorted, radix] = Enum.map(tries, &TrieHard.auto_complete(&1, "", 10_000))
       assert sorted == radix
+      assert sorted == Enum.sort(sorted)
     end
   end
 
@@ -62,7 +79,7 @@ defmodule TrieHardTest do
         assert TrieHard.get(trie, "hello") == {:ok, "world"}
       end
 
-      test "returns not_found for missing keys" do
+      test "returns :error for missing keys" do
         trie = TrieHard.new(layout: @layout)
 
         assert TrieHard.get(trie, "missing") == :error
@@ -208,6 +225,31 @@ defmodule TrieHardTest do
         assert TrieHard.count_prefix(trie, "w") == 1_000
         assert TrieHard.get(trie, "ok") == :error
       end
+
+      test "bulk chunks are also bounded by bytes" do
+        trie = TrieHard.new(layout: @layout)
+        big = String.duplicate("b", 1_100_000)
+
+        # `big` alone exceeds the 1 MiB chunk bound, so it is sent (and kept)
+        # before the chunk holding the invalid element fails.
+        assert_raise ArgumentError, fn -> TrieHard.add_word_list(trie, [big, "ok", :bad]) end
+        assert TrieHard.get(trie, big) == {:ok, big}
+        assert TrieHard.get(trie, "ok") == :error
+
+        assert_raise ArgumentError, fn ->
+          TrieHard.insert_many(trie, [{"v", big}, {"ok", 1}, :bad])
+        end
+
+        assert TrieHard.get(trie, "v") == {:ok, big}
+        assert TrieHard.get(trie, "ok") == :error
+      end
+
+      test "add_word_list accepts any enumerable" do
+        trie = TrieHard.new(layout: @layout)
+        assert TrieHard.add_word_list(trie, Stream.map(1..3, &"s#{&1}")) == :ok
+        assert TrieHard.add_word_list(trie, MapSet.new(["m"])) == :ok
+        assert TrieHard.auto_complete(trie, "") == ["m", "s1", "s2", "s3"]
+      end
     end
 
     describe "#{layout}: edge cases" do
@@ -292,27 +334,30 @@ defmodule TrieHardTest do
         end
       end
 
-      test "a handle that is not a trie raises ArgumentError" do
-        for handle <- [make_ref(), nil, :trie] do
-          assert_raise ArgumentError, fn -> TrieHard.get(handle, "k") end
-          assert_raise ArgumentError, fn -> TrieHard.insert(handle, "k", 1) end
-        end
-      end
-
       test "non-UTF-8 keys raise ArgumentError" do
         trie = TrieHard.new(layout: @layout)
         bad = <<0xFF, 0xFE>>
 
         assert_raise ArgumentError, fn -> TrieHard.insert(trie, bad, 1) end
         assert_raise ArgumentError, fn -> TrieHard.get(trie, bad) end
+        assert_raise ArgumentError, fn -> TrieHard.delete(trie, bad) end
+        assert_raise ArgumentError, fn -> TrieHard.prefix?(trie, bad) end
+        assert_raise ArgumentError, fn -> TrieHard.count_prefix(trie, bad) end
         assert_raise ArgumentError, fn -> TrieHard.auto_complete(trie, bad, 1) end
         assert_raise ArgumentError, fn -> TrieHard.add_word_list(trie, [bad]) end
+        assert_raise ArgumentError, fn -> TrieHard.insert_many(trie, [{bad, 1}]) end
       end
 
       test "auto_complete rejects a negative limit" do
         assert_raise FunctionClauseError, fn ->
           TrieHard.auto_complete(TrieHard.new(layout: @layout), "x", -1)
         end
+      end
+
+      test "auto_complete accepts limits beyond 64 bits" do
+        trie = TrieHard.new(layout: @layout)
+        TrieHard.insert(trie, "a", 1)
+        assert TrieHard.auto_complete(trie, "", 2 ** 70) == ["a"]
       end
     end
 
@@ -549,32 +594,64 @@ defmodule TrieHardTest do
         end
       end
 
-      test "readers complete while a writer bulk-loads" do
+      test "readers see whole chunks, in order, while a writer bulk-loads" do
         trie = TrieHard.new(layout: @layout)
         assert TrieHard.insert(trie, "shared", :data) == :ok
         words = for i <- 1..200_000, do: "w#{i}"
+        parent = self()
 
-        writer = Task.async(fn -> TrieHard.add_word_list(trie, words) end)
+        writer =
+          Task.async(fn ->
+            send(parent, :writer_started)
+            TrieHard.add_word_list(trie, words)
+          end)
 
-        readers =
+        assert_receive :writer_started, 5_000
+
+        # Readers poll until the load is done. Five of them also count the
+        # loaded words (an O(n) traversal) to check chunk atomicity and order.
+        observations =
           1..50
           |> Task.async_stream(
             fn i ->
-              for _ <- 1..20 do
-                {:ok, :data} = TrieHard.get(trie, "shared")
-                found = TrieHard.auto_complete(trie, "w#{i}", 5)
-                true = Enum.all?(found, &String.starts_with?(&1, "w#{i}"))
+              observe = fn ->
+                count = if i <= 5, do: TrieHard.count_prefix(trie, "w")
+
+                {TrieHard.get(trie, "shared"), TrieHard.auto_complete(trie, "w#{i}", 5), count,
+                 TrieHard.get(trie, "w200000") != :error}
               end
 
-              :done
+              obs =
+                Enum.reduce_while(1..100_000, [], fn _, acc ->
+                  {_, _, _, done?} = latest = observe.()
+                  acc = [latest | acc]
+                  if done?, do: {:halt, acc}, else: {:cont, acc}
+                end)
+
+              {i, Enum.reverse(obs)}
             end,
             max_concurrency: 50,
-            timeout: 30_000
+            timeout: 60_000
           )
-          |> Enum.to_list()
+          |> Enum.map(fn {:ok, result} -> result end)
 
-        assert Task.await(writer, 30_000) == :ok
-        assert readers == List.duplicate({:ok, :done}, 50)
+        assert Task.await(writer, 60_000) == :ok
+
+        counts =
+          for {i, obs} <- observations, {shared, found, count, _} <- obs, count != nil do
+            assert shared == {:ok, :data}
+            assert Enum.all?(found, &String.starts_with?(&1, "w#{i}"))
+            # Each chunk is inserted under one write lock.
+            assert rem(count, 1_000) == 0
+            count
+          end
+
+        for {i, obs} <- observations, i <= 5 do
+          reader_counts = Enum.map(obs, &elem(&1, 2))
+          assert reader_counts == Enum.sort(reader_counts), "counts went backwards"
+        end
+
+        assert Enum.any?(counts, &(&1 < 200_000)), "no read overlapped the bulk load"
         assert TrieHard.count_prefix(trie, "w") == 200_000
         assert TrieHard.get(trie, "w200000") == {:ok, "w200000"}
       end

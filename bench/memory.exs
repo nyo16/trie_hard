@@ -19,9 +19,10 @@ rss = fn ->
   out |> String.trim() |> String.to_integer() |> Kernel.*(1024)
 end
 
+# Create the trie first so the NIF library is loaded before the baseline.
+trie = TrieHard.new(layout: String.to_existing_atom(layout))
 :erlang.garbage_collect()
 before = rss.()
-trie = TrieHard.new(layout: String.to_existing_atom(layout))
 :ok = TrieHard.add_word_list(trie, words)
 :erlang.garbage_collect()
 loaded = rss.()
