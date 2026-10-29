@@ -170,8 +170,20 @@ git tag v0.3.0 && git push origin v0.3.0
 
 The `Precomp NIFs` workflow builds and attests the NIFs for every target, publishes them as a
 GitHub release, commits the checksum file and the version bump (`mix.exs`, `Cargo.toml`,
-`Cargo.lock`) to master, and publishes the tagged source to Hex. The tag sets the version.
-It needs a `HEX_API_KEY` repository secret and permission for GitHub Actions to push to master.
+`Cargo.lock`) to master, and checks that the package compiles with the downloaded NIF. The tag
+sets the version. GitHub Actions must be allowed to push to master.
+
+Publishing to Hex:
+
+- With a `HEX_API_KEY` repository secret, the workflow publishes the tagged source itself.
+- Without it, publish from your machine once the workflow is green, using your Hex login
+  (`mix hex.user auth` once):
+
+  ```bash
+  git switch master && git pull   # picks up the "Release v0.3.0: checksum file and version" commit
+  unset TRIE_HARD_BUILD           # use the precompiled NIFs, checked against the new checksums
+  mix hex.publish
+  ```
 
 ## Architecture
 

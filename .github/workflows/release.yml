@@ -4,8 +4,9 @@
 # and publishes the tagged source to Hex. The tag is the source of truth for
 # the version.
 #
-# Requirements: a `HEX_API_KEY` repository secret, and GitHub Actions allowed
-# to push to master (for the checksum/version commit).
+# Requirements: GitHub Actions allowed to push to master (for the
+# checksum/version commit). With a `HEX_API_KEY` repository secret the
+# workflow also publishes to Hex; without it, publish from a laptop (README).
 
 name: Precomp NIFs
 
@@ -262,9 +263,13 @@ jobs:
           exit 1
 
   hex:
-    name: Publish to Hex
+    name: Verify package and publish to Hex
     needs: checksum
     runs-on: ubuntu-24.04
+
+    env:
+      # Secrets cannot gate a job, so the publish step checks this instead.
+      HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
 
     permissions:
       contents: read
@@ -305,7 +310,12 @@ jobs:
           mix run --no-start -e 'trie = TrieHard.new(); :ok = TrieHard.insert(trie, "a", 1); {:ok, 1} = TrieHard.fetch(trie, "a")'
 
       - name: Publish to Hex
+        if: env.HEX_API_KEY != ''
         env:
           MIX_ENV: dev
-          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
         run: mix hex.publish --yes
+
+      - name: Hex publish skipped (no HEX_API_KEY secret)
+        if: env.HEX_API_KEY == ''
+        run: |
+          echo "::notice::HEX_API_KEY is not set, so nothing was published to Hex. Publish from a laptop: git switch master && git pull && mix hex.publish"

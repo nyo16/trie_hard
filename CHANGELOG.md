@@ -97,9 +97,9 @@ found? = TrieHard.prefix?(trie, prefix)
 - Precompiled NIFs are built with a pinned Rust toolchain (`rust-toolchain.toml`, 1.97.1) by a
   vendored build script, with `cross` installed from a hash-verified release and its images
   pinned by digest; macOS artifacts are built on `macos-15` (`macos-13` was retired).
-  Releases are fully automated from a `v*` tag: artifacts are attested, published as a GitHub
-  release, a checksum file matching the attested bytes is committed to master, and the tagged
-  source is published to Hex.
+  Releases are automated from a `v*` tag: artifacts are attested, published as a GitHub
+  release, and a checksum file matching the attested bytes is committed to master; the package
+  is published to Hex by the workflow (with a `HEX_API_KEY` secret) or with `mix hex.publish`.
 - The crate declares MSRV 1.91.
 
 ### Added
