@@ -26,12 +26,14 @@ print_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
+REPO="nyo16/trie_hard"
+
 # Function to get current version from mix.exs
 get_current_version() {
-    grep '@version' mix.exs | head -n 1 | sed 's/.*@version "\(.*\)".*/\1/'
+    awk -F'"' '/^  @version / { print $2; exit }' mix.exs
 }
 
-# Function to update version in mix.exs
+# Function to update version in mix.exs, Cargo.toml and Cargo.lock
 update_version() {
     local new_version=$1
     sed -i.bak "s/@version \".*\"/@version \"$new_version\"/" mix.exs
@@ -42,6 +44,9 @@ update_version() {
     awk -v v="$new_version" '!done && /^version = / { print "version = \"" v "\""; done = 1; next } { print }' \
         "$cargo_toml" > "$cargo_toml.tmp"
     mv "$cargo_toml.tmp" "$cargo_toml"
+
+    # Record the new crate version in Cargo.lock (release builds use --locked).
+    (cd native/trie_hard_native && cargo update --workspace --offline)
 }
 
 # Function to validate version format
@@ -56,7 +61,7 @@ validate_version() {
 # Function to check if tag already exists
 check_tag_exists() {
     local tag=$1
-    if git tag -l | grep -qx -- "$tag"; then
+    if git rev-parse -q --verify "refs/tags/$tag" > /dev/null; then
         print_error "Tag $tag already exists locally!"
         exit 1
     fi
@@ -66,11 +71,45 @@ check_tag_exists() {
     fi
 }
 
+# Releases are cut from an up-to-date master, before anything is committed.
+check_release_branch() {
+    local current_branch
+    current_branch=$(git rev-parse --abbrev-ref HEAD)
+    if [[ "$current_branch" != "master" ]]; then
+        print_error "Releases must be cut from master (current branch: $current_branch)."
+        exit 1
+    fi
+    git fetch origin master
+    if [[ "$(git rev-parse master)" != "$(git rev-parse origin/master)" ]]; then
+        print_error "Local master differs from origin/master. Pull or push first."
+        exit 1
+    fi
+}
+
+# What gets published must be exactly the tagged commit: no local edits and no
+# untracked files (mix hex.publish packs the working tree).
+check_tree_matches_tag() {
+    local tag=$1
+    if ! git rev-parse -q --verify "refs/tags/$tag^{commit}" > /dev/null; then
+        print_error "Tag $tag does not exist locally. Run 'git fetch --tags' first."
+        exit 1
+    fi
+    if [[ "$(git rev-parse HEAD)" != "$(git rev-parse "$tag^{commit}")" ]]; then
+        print_error "HEAD is not the commit tagged $tag. Check out $tag first."
+        exit 1
+    fi
+    if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
+        print_error "Working tree is not clean (including untracked files):"
+        git status --porcelain --untracked-files=all
+        exit 1
+    fi
+}
+
 # Function to check git status
 check_git_status() {
-    if ! git diff-index --quiet HEAD --; then
-        print_error "You have uncommitted changes. Please commit or stash them first."
-        git status --porcelain
+    if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
+        print_error "You have uncommitted or untracked changes. Please commit or stash them first."
+        git status --porcelain --untracked-files=all
         exit 1
     fi
 }
@@ -127,51 +166,82 @@ wait_for_actions() {
 }
 
 # Function to generate checksum file
+sha256_of() {
+    if command -v sha256sum > /dev/null; then
+        sha256sum "$1" | cut -d' ' -f1
+    else
+        shasum -a 256 "$1" | cut -d' ' -f1
+    fi
+}
+
+# Generates the checksum file and proves it covers exactly the attested
+# artifacts: every asset is verified against the tagged release workflow, and
+# every checksum entry must equal the SHA-256 of a verified asset.
 generate_checksum() {
     local version=$1
-    print_info "Verifying build provenance attestations for release v$version..."
+    local tag="v$version"
     local assets_dir
     assets_dir=$(mktemp -d)
-    if ! gh release download "v$version" --repo nyo16/trie_hard --dir "$assets_dir" --pattern '*.tar.gz'; then
-        print_error "Failed to download release assets for v$version."
-        rm -rf "$assets_dir"
+    trap 'rm -rf "$assets_dir"' RETURN
+
+    print_info "Downloading release assets for $tag..."
+    if ! gh release download "$tag" --repo "$REPO" --dir "$assets_dir" --pattern '*.tar.gz'; then
+        print_error "Failed to download release assets for $tag."
         exit 1
     fi
-    local asset found=false
+
+    print_info "Verifying build provenance attestations..."
+    local asset count=0
     for asset in "$assets_dir"/*.tar.gz; do
         [[ -e "$asset" ]] || continue
-        found=true
-        if ! gh attestation verify "$asset" --repo nyo16/trie_hard; then
+        count=$((count + 1))
+        if ! gh attestation verify "$asset" \
+            --repo "$REPO" \
+            --signer-workflow "$REPO/.github/workflows/release.yml" \
+            --source-ref "refs/tags/$tag" \
+            --deny-self-hosted-runners; then
             print_error "Attestation verification failed for $(basename "$asset"). Aborting."
-            rm -rf "$assets_dir"
             exit 1
         fi
     done
-    rm -rf "$assets_dir"
-    if [[ "$found" == "false" ]]; then
-        print_error "No release assets found for v$version."
+    if [[ "$count" -eq 0 ]]; then
+        print_error "No release assets found for $tag."
         exit 1
     fi
-    print_success "All release assets have valid attestations!"
+    print_success "$count release assets have valid attestations from the $tag release workflow."
 
     print_info "Generating checksum file for precompiled NIFs..."
-
-    # Download all precompiled NIFs and generate checksum
-    if ! timeout 60 mix rustler_precompiled.download TrieHard.Native --all --print; then
+    if ! mix rustler_precompiled.download TrieHard.Native --all --print; then
         print_error "Failed to download precompiled NIFs or generate checksum."
         print_info "Make sure all GitHub Actions builds completed successfully."
         exit 1
     fi
 
-    # Check if checksum file was created
-    if ls checksum-*.exs 1> /dev/null 2>&1; then
-        local checksum_file
-        checksum_file=$(ls checksum-*.exs)
-        print_success "Checksum file created: $checksum_file"
-    else
+    local checksum_file
+    checksum_file=$(ls checksum-*.exs 2> /dev/null || true)
+    if [[ -z "$checksum_file" ]]; then
         print_error "No checksum file found. This is required for publishing to Hex."
         exit 1
     fi
+
+    # Each entry looks like: "<file>.tar.gz" => "sha256:<hex>",
+    local entries
+    entries=$(grep -c '=> "sha256:' "$checksum_file" || true)
+    if [[ "$entries" -ne "$count" ]]; then
+        print_error "$checksum_file has $entries entries but $count attested assets were verified."
+        exit 1
+    fi
+    for asset in "$assets_dir"/*.tar.gz; do
+        local name expected
+        name=$(basename "$asset")
+        expected="\"$name\" => \"sha256:$(sha256_of "$asset")\""
+        if ! grep -qF -- "$expected" "$checksum_file"; then
+            print_error "$checksum_file does not match the attested bytes of $name."
+            exit 1
+        fi
+    done
+    print_success "Checksum file $checksum_file matches all $count attested assets."
+    print_warning "Commit $checksum_file after publishing (it is tracked in git)."
 }
 
 # Function to verify package contents
@@ -240,18 +310,20 @@ EXAMPLES:
     $0 --dry-run 1.0.3          # Show what would happen
 
 COMPLETE WORKFLOW:
-    1. Check git status (no uncommitted changes)
+    1. Check branch is an up-to-date master and the tree is clean (incl. untracked)
     2. Validate version format
-    3. Check if tag already exists
+    3. Check if tag already exists (locally and on origin)
     4. Run tests (unless --skip-tests)
     5. Check code formatting (unless --skip-format)
-    6. Update version in mix.exs and native/trie_hard_native/Cargo.toml
+    6. Update version in mix.exs, Cargo.toml and Cargo.lock
     7. Commit version change
     8. Create and push git tag
     9. Wait for GitHub Actions to build all NIFs
-    10. Verify artifact attestations, generate checksum file from precompiled NIFs
-    11. Verify package contents
-    12. Publish to Hex.pm
+    10. Check HEAD is the tagged commit with a clean tree (also for --hex-only)
+    11. Verify attestations (release workflow, tag ref, GitHub-hosted runners),
+        generate the checksum file and check it matches the attested bytes
+    12. Verify package contents
+    13. Publish to Hex.pm
 
 The rustler_precompiled flow requires:
 - GitHub Actions to build NIFs for multiple platforms
@@ -338,6 +410,7 @@ if [[ "$HEX_ONLY" == "false" ]]; then
     check_tag_exists "v$VERSION"
 
     if [[ "$DRY_RUN" == "false" ]]; then
+        check_release_branch
         check_git_status
     fi
 fi
@@ -368,17 +441,8 @@ if [[ "$HEX_ONLY" == "false" ]]; then
         update_version "$VERSION"
 
         print_info "Committing version change..."
-        git add mix.exs native/trie_hard_native/Cargo.toml
-        if ! git diff --quiet -- native/trie_hard_native/Cargo.lock; then
-            git add native/trie_hard_native/Cargo.lock
-        fi
+        git add mix.exs native/trie_hard_native/Cargo.toml native/trie_hard_native/Cargo.lock
         git commit -m "Bump version to $VERSION"
-
-        current_branch=$(git rev-parse --abbrev-ref HEAD)
-        if [[ "$current_branch" != "master" ]]; then
-            print_error "Releases must be pushed from master (current branch: $current_branch)."
-            exit 1
-        fi
 
         print_info "Pushing version change..."
         git push origin master
@@ -403,6 +467,7 @@ fi
 # Hex publishing workflow
 if [[ "$TAG_ONLY" == "false" ]]; then
     if [[ "$DRY_RUN" == "false" ]]; then
+        check_tree_matches_tag "v$VERSION"
         generate_checksum "$VERSION"
         verify_package
         publish_to_hex "$VERSION"
@@ -411,7 +476,8 @@ if [[ "$TAG_ONLY" == "false" ]]; then
         print_success "Release $VERSION completed successfully!"
         print_info "Package is now available at: https://hex.pm/packages/trie_hard"
     else
-        print_info "Would generate checksum file"
+        print_info "Would check HEAD is v$VERSION with a clean tree"
+        print_info "Would verify attestations and generate a matching checksum file"
         print_info "Would verify package contents"
         print_info "Would publish to Hex.pm"
         print_info "Would cleanup temporary files"

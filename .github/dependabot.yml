@@ -4,11 +4,20 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
   - package-ecosystem: "cargo"
     directory: "/native/trie_hard_native"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
   - package-ecosystem: "mix"
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
