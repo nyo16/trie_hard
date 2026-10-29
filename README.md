@@ -160,6 +160,31 @@ cargo test --manifest-path native/trie_hard_native/Cargo.toml
 `bin/test.sh` runs the same checks as CI (formatting, tests, clippy, `cargo test`).
 The Rust toolchain is pinned in `rust-toolchain.toml`; `rustup` installs it automatically.
 
+### Releasing
+
+Push a version tag; GitHub Actions does the rest:
+
+```bash
+git tag v0.3.0 && git push origin v0.3.0
+```
+
+The `Precomp NIFs` workflow builds and attests the NIFs for every target, publishes them as a
+GitHub release, commits the checksum file and the version bump (`mix.exs`, `Cargo.toml`,
+`Cargo.lock`) to master, and checks that the package compiles with the downloaded NIF. The tag
+sets the version. GitHub Actions must be allowed to push to master.
+
+Publishing to Hex:
+
+- With a `HEX_API_KEY` repository secret, the workflow publishes the tagged source itself.
+- Without it, publish from your machine once the workflow is green, using your Hex login
+  (`mix hex.user auth` once):
+
+  ```bash
+  git switch master && git pull   # picks up the "Release v0.3.0: checksum file and version" commit
+  unset TRIE_HARD_BUILD           # use the precompiled NIFs, checked against the new checksums
+  mix hex.publish
+  ```
+
 ## Architecture
 
 - **Elixir** (`lib/trie_hard.ex`): public API; encodes values with `:erlang.term_to_binary/1` and

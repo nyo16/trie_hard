@@ -1,5 +1,12 @@
-# https://github.com/elixir-explorer/explorer/blob/main/.github/workflows/release.yml
-# https://github.com/Takashiidobe/rust-build-binary-github-actions/blob/master/.github/workflows/release.yml
+# Builds the precompiled NIFs on every relevant push/PR. Pushing a `v*` tag
+# also releases: attests and publishes the artifacts as a GitHub release,
+# generates the checksum file and commits it (with the version bump) to master,
+# and publishes the tagged source to Hex. The tag is the source of truth for
+# the version.
+#
+# Requirements: GitHub Actions allowed to push to master (for the
+# checksum/version commit). With a `HEX_API_KEY` repository secret the
+# workflow also publishes to Hex; without it, publish from a laptop (README).
 
 name: Precomp NIFs
 
@@ -12,6 +19,7 @@ on:
       - ".github/workflows/release.yml"
       - "rust-toolchain.toml"
       - "scripts/build-nif.sh"
+      - "scripts/set-version.sh"
     tags:
       - "v*"
   pull_request:
@@ -19,11 +27,16 @@ on:
       - ".github/workflows/release.yml"
       - "rust-toolchain.toml"
       - "scripts/build-nif.sh"
+      - "scripts/set-version.sh"
       - "native/trie_hard_native/Cross.toml"
   workflow_dispatch:
 
 permissions:
   contents: read
+
+env:
+  OTP_VERSION: "28"
+  ELIXIR_VERSION: "1.19"
 
 jobs:
   build:
@@ -56,20 +69,16 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Extract crate information
+      - name: Determine the version
         shell: bash
         run: |
-          # Get the project version from mix.exs
-          echo "PROJECT_VERSION=$(sed -n 's/^  @version "\(.*\)"/\1/p' mix.exs | head -n1)" >> $GITHUB_ENV
-
-      - name: Check the tag matches the mix.exs version
-        if: startsWith(github.ref, 'refs/tags/')
-        shell: bash
-        run: |
-          if [[ "$GITHUB_REF_NAME" != "v$PROJECT_VERSION" ]]; then
-            echo "::error::tag $GITHUB_REF_NAME does not match mix.exs version $PROJECT_VERSION"
-            exit 1
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            # Releases take the version from the tag (validated as strict semver).
+            version=$(scripts/set-version.sh --check "${GITHUB_REF_NAME#v}")
+          else
+            version=$(sed -n 's/^  @version "\(.*\)"/\1/p' mix.exs | head -n1)
           fi
+          echo "PROJECT_VERSION=$version" >> "$GITHUB_ENV"
 
       - name: Install pinned Rust toolchain (rust-toolchain.toml)
         shell: bash
@@ -113,8 +122,9 @@ jobs:
           path: ${{ steps.build-crate.outputs.file-path }}
           if-no-files-found: error
 
-  publish:
-    name: Attest and publish release
+  # Runs only when every build leg succeeded, so the release is never partial.
+  github_release:
+    name: Attest and create the GitHub release
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
@@ -136,8 +146,176 @@ jobs:
         with:
           subject-path: dist/*.tar.gz
 
-      - name: Publish archives and packages
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+      - name: Create the release with all artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/*.tar.gz --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/*.tar.gz --verify-tag --generate-notes
+          fi
+
+  # Generates the checksum file from the published artifacts, checks it covers
+  # exactly the attested bytes, and commits it with the version bump to master.
+  checksum:
+    name: Checksum file and version commit
+    needs: github_release
+    runs-on: ubuntu-24.04
+
+    permissions:
+      contents: write
+
+    steps:
+      # master, not the tag: this job pushes the checksum/version commit there.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          files: dist/*.tar.gz
-          fail_on_unmatched_files: true
+          ref: master
+
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          version-type: loose
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+
+      - name: Install pinned Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+
+      - name: Set the version from the tag
+        run: echo "VERSION=$(scripts/set-version.sh "${GITHUB_REF_NAME#v}")" >> "$GITHUB_ENV"
+
+      # TRIE_HARD_BUILD=1 throughout: compiling with precompiled downloads would
+      # look the host NIF up in the old checksum file and raise.
+      - name: Compile and list the artifacts native.ex declares
+        env:
+          TRIE_HARD_BUILD: "1"
+        run: |
+          mix deps.get
+          mix run --no-start -e '
+            for {name, _url} <- RustlerPrecompiled.available_nifs(TrieHard.Native), do: IO.puts(name)
+          ' | grep '\.tar\.gz$' | sort > /tmp/expected.txt
+          cat /tmp/expected.txt
+          test -s /tmp/expected.txt
+
+      - name: Download the release assets and verify their attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release download "$GITHUB_REF_NAME" --dir dist --pattern '*.tar.gz'
+          (cd dist && ls *.tar.gz | sort) > /tmp/released.txt
+          if ! diff -u /tmp/expected.txt /tmp/released.txt; then
+            echo "::error::release assets differ from the artifacts native.ex declares"
+            exit 1
+          fi
+          for asset in dist/*.tar.gz; do
+            gh attestation verify "$asset" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --source-ref "$GITHUB_REF" \
+              --source-digest "$GITHUB_SHA" \
+              --deny-self-hosted-runners
+          done
+
+      - name: Generate the checksum file
+        env:
+          TRIE_HARD_BUILD: "1"
+        run: mix rustler_precompiled.download TrieHard.Native --all --print
+
+      - name: The checksum file must match the attested bytes exactly
+        run: |
+          checksum_file=checksum-Elixir.TrieHard.Native.exs
+          entries=$(grep -c '=> "sha256:' "$checksum_file")
+          expected=$(wc -l < /tmp/expected.txt)
+          if [[ "$entries" -ne "$expected" ]]; then
+            echo "::error::$checksum_file has $entries entries, expected $expected"
+            exit 1
+          fi
+          for asset in dist/*.tar.gz; do
+            line="\"$(basename "$asset")\" => \"sha256:$(sha256sum "$asset" | cut -d' ' -f1)\""
+            grep -qF -- "$line" "$checksum_file" || {
+              echo "::error::$checksum_file does not match the attested bytes of $(basename "$asset")"
+              exit 1
+            }
+          done
+
+      - name: Commit the checksum file and version to master
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add checksum-Elixir.TrieHard.Native.exs mix.exs \
+            native/trie_hard_native/Cargo.toml native/trie_hard_native/Cargo.lock
+          if git diff --staged --quiet; then
+            echo "Nothing to commit"
+            exit 0
+          fi
+          git commit -m "Release $GITHUB_REF_NAME: checksum file and version"
+          for attempt in 1 2 3 4 5; do
+            if git push origin HEAD:master; then
+              exit 0
+            fi
+            echo "Push rejected (attempt $attempt); rebasing onto origin/master"
+            git fetch origin master
+            git rebase origin/master
+          done
+          echo "::error::could not push the checksum commit to master"
+          exit 1
+
+  hex:
+    name: Verify package and publish to Hex
+    needs: checksum
+    runs-on: ubuntu-24.04
+
+    env:
+      # Secrets cannot gate a job, so the publish step checks this instead.
+      HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
+
+    permissions:
+      contents: read
+
+    steps:
+      # The tag, not master: the Hex package must be the source the NIFs were
+      # built from. Only the checksum file comes from master.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Take the generated checksum file from master
+        run: |
+          git fetch --no-tags --depth 1 origin master
+          git checkout FETCH_HEAD -- checksum-Elixir.TrieHard.Native.exs
+          cat checksum-Elixir.TrieHard.Native.exs
+
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          version-type: loose
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+
+      - name: Install pinned Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+
+      - name: Set the version from the tag
+        run: scripts/set-version.sh "${GITHUB_REF_NAME#v}"
+
+      # Without TRIE_HARD_BUILD: downloads this runner's NIF through the normal
+      # install path and checks it against the checksum file being shipped.
+      - name: Compile with the precompiled NIF
+        env:
+          MIX_ENV: dev
+        run: |
+          mix deps.get
+          mix compile
+          mix run --no-start -e 'trie = TrieHard.new(); :ok = TrieHard.insert(trie, "a", 1); {:ok, 1} = TrieHard.fetch(trie, "a")'
+
+      - name: Publish to Hex
+        if: env.HEX_API_KEY != ''
+        env:
+          MIX_ENV: dev
+        run: mix hex.publish --yes
+
+      - name: Hex publish skipped (no HEX_API_KEY secret)
+        if: env.HEX_API_KEY == ''
+        run: |
+          echo "::notice::HEX_API_KEY is not set, so nothing was published to Hex. Publish from a laptop: git switch master && git pull && mix hex.publish"

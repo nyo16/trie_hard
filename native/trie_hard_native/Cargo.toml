@@ -1,6 +1,6 @@
 [package]
 name = "trie_hard_native"
-# Kept equal to the Elixir package version (scripts/release.sh bumps both).
+# Kept equal to the Elixir package version (scripts/set-version.sh writes both on release).
 version = "0.2.7"
 authors = ["Niko"]
 edition = "2021"
