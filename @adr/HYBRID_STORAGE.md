@@ -1,8 +1,29 @@
 # ADR: Hybrid Storage for Arbitrary Erlang Terms
 
-**Status:** Proposed  
+**Status:** Superseded (see "Outcome")  
 **Date:** 2025-09-23  
 **Decision Makers:** Development Team  
+
+## Outcome
+
+The `OwnedTerm` design below was never built: rustler 0.37 has no owned-term type that can
+live in a resource across NIF calls. Holding a term would need its own `OwnedEnv` (a separate
+process-independent heap per stored value), which is heavier than copying bytes.
+
+- **0.2.7** shipped the "hybrid" variant: strings stored as Rust `String`s, every other term as
+  external term format bytes produced inside the NIF, and `get/2` guessing whether a returned
+  binary was ETF (`binary_to_term` inside `try/rescue`). The guess mis-decoded string values
+  that happened to be valid ETF. It shipped as a 0.2.x release without a major version bump.
+- **0.3.0** replaced it: every value is encoded with `:erlang.term_to_binary/1` in Elixir and
+  stored as bytes (`Value(Arc<[u8]>)`); `add_word_list/2` stores a shared empty `Arc` meaning
+  "the key is the value" (ETF is never empty, so no bytes are stored). `get/2` copies the bytes
+  out after releasing the lock and decodes with `:erlang.binary_to_term(bin, [:safe])`.
+  Encoding/decoding runs in yielding BIFs in the caller, not in the NIF, and no decode guessing
+  remains.
+
+The "Binary Encoding (Rejected)" alternative below is therefore what shipped. Its cost
+estimates (2x memory, 3-5x CPU for strings) were not measured; the ETF overhead for a short
+string is 6 bytes, and the 0.3.0 benchmarks are in the README.
 
 ## Context
 

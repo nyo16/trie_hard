@@ -5,7 +5,9 @@ on:
   push:
     branches:
       - master
-      - feat/support_for_erlang_terms
+
+permissions:
+  contents: read
 
 jobs:
   mix_test:
@@ -24,22 +26,28 @@ jobs:
               elixir: 1.18.4
               otp: "26.2"
           - pair:
-              elixir: 1.18.4
-              otp: "27.3"
+              elixir: "1.19"
+              otp: "28"
+          - pair:
+              elixir: "1.20"
+              otp: "29"
             lint: lint
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: erlef/setup-beam@v1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
+          persist-credentials: false
+
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          version-type: loose
           otp-version: ${{ matrix.pair.otp }}
           elixir-version: ${{ matrix.pair.elixir }}
 
-      - name: Install minimal stable Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
 
       - name: Install Dependencies
-        run: mix deps.get
+        run: mix deps.get --check-locked
 
       - run: mix format --check-formatted
         if: ${{ matrix.lint }}
@@ -58,4 +66,8 @@ jobs:
         run: cargo fmt --manifest-path=native/trie_hard_native/Cargo.toml --all -- --check
 
       - name: run clippy
-        run: cargo clippy --manifest-path=native/trie_hard_native/Cargo.toml -- -Dwarnings
+        run: cargo clippy --manifest-path=native/trie_hard_native/Cargo.toml --locked --all-targets -- -Dwarnings
+
+      - name: run cargo test
+        run: cargo test --manifest-path=native/trie_hard_native/Cargo.toml --locked
+        if: ${{ matrix.lint }}
