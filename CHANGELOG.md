@@ -47,15 +47,24 @@ found? = TrieHard.prefix?(trie, prefix)
 ### Changed
 
 - **Default layout is `:radix`** (path-compressed). In the bundled benchmark it uses ~10x less
-  memory than the 0.2.9 layout (75 vs 764 bytes per key for 200,000 `"word_<n>_suffix"` keys)
-  and is as fast or faster for every operation except `prefix?/2` (~15 ns slower).
+  memory than the 0.2.9 layout (60–80 vs 764 bytes per key for 200,000 `"word_<n>_suffix"` keys)
+  and is faster for writes, `auto_complete/3` and `count_prefix/2`; point lookups (`get/2`,
+  `prefix?/2`) are 8–15 ns slower.
   `TrieHard.new(layout: :sorted)` keeps the 0.2.9 structure. Results are identical.
 
 ### Added
 
 - `new/1` with `layout: :radix | :sorted`. Unknown options or layouts raise `ArgumentError`.
 - `insert_many/2`: inserts `{key, value}` pairs from any enumerable, in chunks of 1,000 on a dirty
-  scheduler; not atomic (an invalid element raises `ArgumentError`, earlier chunks stay inserted).
+  scheduler; not atomic (an invalid element raises `ArgumentError`; earlier chunks stay inserted,
+  entries in its chunk are not).
+
+### Fixed
+
+- Fast (normal-scheduler) calls also hand off to a dirty scheduler when they would copy more
+  than 64 KiB of key bytes (long stored keys in `auto_complete/3`, radix edge splits/merges),
+  not only after 10,000 node visits. Key size is checked before UTF-8 validation, so a huge
+  key is no longer scanned on a normal scheduler.
 
 ## [0.2.9] - Unreleased
 

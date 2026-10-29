@@ -1,6 +1,6 @@
 //! Byte-keyed trie with sorted child arrays (one node per key byte).
 
-use crate::store::OverBudget;
+use crate::store::{Budget, OverBudget};
 
 /// A trie node. Children are only reachable through the accessor methods
 /// below so the child representation can change without touching the
@@ -163,12 +163,13 @@ impl<T> SortedTrie<T> {
 
     /// Up to `max_results` stored keys starting with `prefix`, in ascending
     /// byte order (= codepoint order for UTF-8 keys).
-    /// Visits at most `budget` nodes below the prefix, else `Err(OverBudget)`.
+    /// Charges one node visit per node below the prefix and every byte
+    /// copied into results against `budget`, else `Err(OverBudget)`.
     pub fn complete(
         &self,
         prefix: &[u8],
         max_results: usize,
-        mut budget: usize,
+        mut budget: Budget,
     ) -> Result<Vec<Vec<u8>>, OverBudget> {
         let mut results = Vec::new();
         if max_results == 0 {
@@ -181,10 +182,11 @@ impl<T> SortedTrie<T> {
         let mut buf = prefix.to_vec();
         let mut stack: Vec<(&Node<T>, usize, Option<u8>)> = vec![(start, buf.len(), None)];
         while let Some((node, buf_len, byte)) = stack.pop() {
-            budget = budget.checked_sub(1).ok_or(OverBudget)?;
+            budget.visit(byte.map_or(0, |_| 1))?;
             buf.truncate(buf_len);
             buf.extend(byte);
             if node.value.is_some() {
+                budget.copy(buf.len())?;
                 results.push(buf.clone());
                 if results.len() >= max_results {
                     break;
@@ -202,15 +204,15 @@ impl<T> SortedTrie<T> {
     }
 
     /// Number of stored keys starting with `prefix`.
-    /// Visits at most `budget` nodes below the prefix, else `Err(OverBudget)`.
-    pub fn count(&self, prefix: &[u8], mut budget: usize) -> Result<usize, OverBudget> {
+    /// Charges one node visit per node below the prefix, else `Err(OverBudget)`.
+    pub fn count(&self, prefix: &[u8], mut budget: Budget) -> Result<usize, OverBudget> {
         let Some(start) = self.find(prefix) else {
             return Ok(0);
         };
         let mut count = 0;
         let mut stack = vec![start];
         while let Some(node) = stack.pop() {
-            budget = budget.checked_sub(1).ok_or(OverBudget)?;
+            budget.visit(0)?;
             if node.value.is_some() {
                 count += 1;
             }
@@ -224,7 +226,10 @@ impl<T> SortedTrie<T> {
 mod tests {
     use super::*;
 
-    const UNLIMITED: usize = usize::MAX;
+    const UNLIMITED: Budget = Budget::UNLIMITED;
+    const fn nodes(n: usize) -> Budget {
+        Budget::new(n, usize::MAX)
+    }
 
     impl<T> SortedTrie<T> {
         pub(crate) fn node_count(&self) -> usize {
@@ -305,16 +310,19 @@ mod tests {
 
     #[test]
     fn very_deep_keys_do_not_overflow() {
-        let key = "a".repeat(100_000);
-        let mut trie = SortedTrie::new();
-        trie.insert(key.as_bytes(), 1);
-        assert_eq!(words(trie.complete(b"", 1, UNLIMITED)), vec![key.clone()]);
-        assert_eq!(trie.count(b"a", UNLIMITED), Ok(1));
-        assert!(trie.delete(key.as_bytes()));
-        assert_eq!(trie.node_count(), 1);
+        // 100k nested nodes on a 256 KiB stack: any recursion would overflow.
+        crate::store::test_support::on_small_stack(|| {
+            let key = "a".repeat(100_000);
+            let mut trie = SortedTrie::new();
+            trie.insert(key.as_bytes(), 1);
+            assert_eq!(words(trie.complete(b"", 1, UNLIMITED)), vec![key.clone()]);
+            assert_eq!(trie.count(b"a", UNLIMITED), Ok(1));
+            assert!(trie.delete(key.as_bytes()));
+            assert_eq!(trie.node_count(), 1);
 
-        trie.insert(key.as_bytes(), 2);
-        drop(trie);
+            trie.insert(key.as_bytes(), 2);
+            drop(trie);
+        });
     }
 
     #[test]
@@ -336,11 +344,19 @@ mod tests {
             trie.insert(key.as_bytes(), ());
         }
         // Nodes under "": root, a, ab, abc.
-        assert_eq!(trie.count(b"", 4), Ok(3));
-        assert_eq!(trie.count(b"", 3), Err(OverBudget));
-        assert_eq!(trie.complete(b"", 10, 3), Err(OverBudget));
-        assert_eq!(words(trie.complete(b"", 1, 2)), vec!["a"]);
-        assert_eq!(trie.count(b"x", 0), Ok(0));
+        assert_eq!(trie.count(b"", nodes(4)), Ok(3));
+        assert_eq!(trie.count(b"", nodes(3)), Err(OverBudget));
+        assert_eq!(trie.complete(b"", 10, nodes(3)), Err(OverBudget));
+        assert_eq!(words(trie.complete(b"", 1, nodes(2))), vec!["a"]);
+        assert_eq!(trie.count(b"x", nodes(0)), Ok(0));
+        // Bytes: "a" costs 1 to extend the buffer and 1 to emit.
+        assert_eq!(words(trie.complete(b"", 1, Budget::new(9, 2))), vec!["a"]);
+        assert_eq!(trie.complete(b"", 1, Budget::new(9, 1)), Err(OverBudget));
+        assert_eq!(trie.complete(b"", 3, Budget::new(9, 8)), Err(OverBudget));
+        assert_eq!(
+            words(trie.complete(b"", 3, Budget::new(9, 9))),
+            ["a", "ab", "abc"]
+        );
     }
 
     #[test]

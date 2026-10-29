@@ -8,8 +8,10 @@ defmodule TrieHard do
   - **Fast**: sub-microsecond lookups and prefix checks
   - **Compact**: shared prefixes; two node layouts (see `new/1`)
   - **Deterministic**: `auto_complete/3` returns keys in lexicographic order
-  - **Unicode**: keys are UTF-8 strings; non-binary keys raise `FunctionClauseError`,
-    invalid UTF-8 raises `ArgumentError`
+  - **Unicode**: keys are UTF-8 strings. Single-key functions raise
+    `FunctionClauseError` for non-binary keys; `insert_many/2` and
+    `add_word_list/2` raise `ArgumentError` for any invalid element; invalid
+    UTF-8 always raises `ArgumentError`
   - **Any value**: values are arbitrary Erlang terms
   - **Concurrent**: see "Concurrency" below
 
@@ -34,10 +36,14 @@ defmodule TrieHard do
   A trie can be shared by any number of processes. Reads run concurrently and
   writes are exclusive (a read-write lock). Each call first runs on the calling
   scheduler without blocking; when the trie is locked by a writer, the key is
-  longer than 4 KiB, the value is larger than 64 KiB, or a traversal needs more
-  than 10,000 node visits, it is transparently retried on a dirty CPU scheduler.
-  `add_word_list/2` and `insert_many/2` always run on a dirty scheduler, in chunks
-  of 1,000 entries.
+  longer than 4 KiB, the value is larger than 64 KiB, or the operation would
+  visit more than 10,000 nodes or copy more than 64 KiB of keys (results, or an
+  edge split/merged in the `:radix` layout), it is transparently retried on a
+  dirty CPU scheduler. `add_word_list/2` and `insert_many/2` always run on a
+  dirty scheduler, in chunks of 1,000 entries.
+
+  While a long write holds the lock, readers wait on dirty schedulers. Bound
+  key lengths for untrusted input: a single huge key makes its write long.
 
   Values are encoded with `:erlang.term_to_binary/1` and decoded with
   `:erlang.binary_to_term/2` (`[:safe]`) in the calling process, never inside
@@ -71,9 +77,10 @@ defmodule TrieHard do
   - `:layout` - `:radix` (default) or `:sorted`.
     - `:radix` is path-compressed: a run of bytes without branches is a single
       node, so inserts and deletes may split or merge edges. In the bundled
-      benchmark it uses about a tenth of the memory of `:sorted` (75 vs 764
-      bytes per key for 200,000 `"word_<n>_suffix"` keys) and is as fast or
-      faster for every operation except `prefix?/2` (~15 ns slower).
+      benchmark it uses about a tenth of the memory of `:sorted` (60–80 vs 764
+      bytes per key for 200,000 `"word_<n>_suffix"` keys). It is faster for
+      writes, `auto_complete/3` and `count_prefix/2`; point lookups (`get/2`,
+      `prefix?/2`) are 8–15 ns slower.
     - `:sorted` stores one node per key byte with sorted child arrays; its
       structure is simpler and never splits or merges nodes.
 
@@ -131,8 +138,9 @@ defmodule TrieHard do
   Later pairs win over earlier ones with the same key. Pairs are sent to the NIF
   in chunks of #{@chunk_size}, so the write lock is never held for long. The
   operation is not atomic: an invalid element (not a `{binary, term}` tuple, or
-  a key that is not UTF-8) raises `ArgumentError`, and the chunks before it stay
-  inserted.
+  a key that is not UTF-8) raises `ArgumentError`; earlier chunks stay inserted,
+  while entries in the invalid element's chunk, including those before it, are
+  not inserted.
 
   ## Examples
 
@@ -254,8 +262,9 @@ defmodule TrieHard do
 
   Words are sent to the NIF in chunks of #{@chunk_size} so the write lock is never
   held for long; readers interleave between chunks. The operation is not atomic:
-  if an element is not a UTF-8 binary, `ArgumentError` is raised and the chunks
-  before it stay inserted.
+  if an element is not a UTF-8 binary, `ArgumentError` is raised; earlier chunks
+  stay inserted, while words in the invalid element's chunk, including those
+  before it, are not inserted.
 
   ## Examples
 

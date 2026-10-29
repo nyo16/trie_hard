@@ -2,6 +2,8 @@ defmodule TrieHardTest do
   use ExUnit.Case, async: true
   doctest TrieHard
 
+  alias TrieHard.Native
+
   @layouts [:sorted, :radix]
 
   describe "new/1" do
@@ -14,7 +16,8 @@ defmodule TrieHardTest do
   describe "layout cross-check" do
     test "both layouts return identical results for the same operation sequence" do
       :rand.seed(:exsss, {20, 26, 10})
-      alphabet = ["a", "b", "é", "🦀"]
+      # é/è and 🦀/🦁 share leading UTF-8 bytes: radix edges split mid-character.
+      alphabet = ["a", "b", "é", "è", "🦀", "🦁"]
       random_key = fn -> Enum.map_join(1..:rand.uniform(6), fn _ -> Enum.random(alphabet) end) end
       tries = Enum.map(@layouts, &TrieHard.new(layout: &1))
 
@@ -334,6 +337,18 @@ defmodule TrieHardTest do
         assert TrieHard.count_prefix(trie, "") == 1000
       end
 
+      test "a deep branching chain does not overflow the scheduler stack" do
+        trie = TrieHard.new(layout: @layout)
+        # "a", "aa", ..., one node per key in both layouts.
+        keys = for n <- 1..3_000, do: String.duplicate("a", n)
+
+        assert TrieHard.add_word_list(trie, keys) == :ok
+        assert TrieHard.count_prefix(trie, "") == 3_000
+        assert TrieHard.auto_complete(trie, "", 2) == ["a", "aa"]
+        assert TrieHard.delete(trie, List.last(keys)) == :ok
+        assert TrieHard.count_prefix(trie, "a") == 2_999
+      end
+
       test "very deep keys do not overflow the scheduler stack" do
         trie = TrieHard.new(layout: @layout)
         key = String.duplicate("a", 10_000)
@@ -347,6 +362,89 @@ defmodule TrieHardTest do
 
       test "prefix? on an empty trie is false" do
         refute TrieHard.prefix?(TrieHard.new(layout: @layout), "")
+      end
+    end
+
+    # Contract (C001): every fast NIF returns :dirty just past each bound and
+    # does the work itself at the bound; the public API retries the twin.
+    describe "#{layout}: fast NIFs hand off to dirty twins" do
+      setup do
+        {:ok, trie: TrieHard.new(layout: @layout), etf: :erlang.term_to_binary(1)}
+      end
+
+      test "keys and prefixes over 4 KiB", %{trie: trie, etf: etf} do
+        at_limit = String.duplicate("k", 4_096)
+        over = at_limit <> "k"
+
+        assert Native.insert(trie, at_limit, etf) == :ok
+        assert Native.get(trie, at_limit) == {:ok, etf}
+        assert Native.prefix_search(trie, at_limit) == true
+        assert Native.count_prefix(trie, at_limit) == 1
+        assert Native.auto_complete(trie, at_limit, 1) == [at_limit]
+        assert Native.delete(trie, at_limit) == true
+
+        assert Native.insert(trie, over, etf) == :dirty
+        assert Native.get(trie, over) == :dirty
+        assert Native.delete(trie, over) == :dirty
+        assert Native.prefix_search(trie, over) == :dirty
+        assert Native.count_prefix(trie, over) == :dirty
+        assert Native.auto_complete(trie, over, 1) == :dirty
+      end
+
+      test "the key size gate runs before UTF-8 validation", %{trie: trie} do
+        assert Native.get(trie, :binary.copy(<<0xFF>>, 5_000)) == :dirty
+
+        assert_raise ArgumentError, fn ->
+          Native.get_dirty(trie, :binary.copy(<<0xFF>>, 5_000))
+        end
+
+        assert_raise ArgumentError, fn -> Native.get(trie, <<0xFF>>) end
+      end
+
+      test "values over 64 KiB", %{trie: trie} do
+        at_limit = :erlang.term_to_binary(:binary.copy(<<0>>, 65_530))
+        over = :erlang.term_to_binary(:binary.copy(<<0>>, 65_531))
+        assert {byte_size(at_limit), byte_size(over)} == {65_536, 65_537}
+
+        assert Native.insert(trie, "a", at_limit) == :ok
+        assert Native.get(trie, "a") == {:ok, at_limit}
+        assert Native.insert(trie, "b", over) == :dirty
+        assert Native.insert_dirty(trie, "b", over) == :ok
+        assert Native.get(trie, "b") == :dirty
+        assert Native.get_dirty(trie, "b") == {:ok, over}
+      end
+
+      test "traversals over 10,000 node visits", %{trie: trie} do
+        TrieHard.add_word_list(trie, for(i <- 1..20_000, do: "w#{i}"))
+
+        assert Native.count_prefix(trie, "w1234") == 11
+        assert Native.count_prefix(trie, "") == :dirty
+        assert Native.count_prefix_dirty(trie, "") == 20_000
+        assert Native.auto_complete(trie, "", 20_000) == :dirty
+        assert length(Native.auto_complete_dirty(trie, "", 20_000)) == 20_000
+      end
+
+      test "copying a long stored key", %{trie: trie, etf: etf} do
+        long = String.duplicate("a", 200_000)
+        assert TrieHard.insert(trie, long, 1) == :ok
+
+        # Sorted: 200k node visits. Radix: 2 visits, but 200 KB copied.
+        assert Native.auto_complete(trie, "", 1) == :dirty
+        assert TrieHard.auto_complete(trie, "", 1) == [long]
+
+        if @layout == :radix do
+          # "ab" splits the 200 KB edge; deleting it merges the edge back.
+          assert Native.insert(trie, "ab", etf) == :dirty
+          assert Native.insert_dirty(trie, "ab", etf) == :ok
+          assert Native.delete(trie, "ab") == :dirty
+          assert Native.delete_dirty(trie, "ab") == true
+        else
+          assert Native.insert(trie, "ab", etf) == :ok
+          assert Native.delete(trie, "ab") == true
+        end
+
+        assert TrieHard.get(trie, "ab") == :error
+        assert TrieHard.get(trie, long) == {:ok, 1}
       end
     end
 

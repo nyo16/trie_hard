@@ -5,7 +5,7 @@ A fast, memory-efficient trie (prefix tree) for Elixir with autocomplete, implem
 ## Features
 
 - **Fast**: sub-microsecond lookups, prefix checks and 10-result autocompletes
-- **Compact**: path-compressed (radix) layout by default, ~75 bytes per key in the benchmark below
+- **Compact**: path-compressed (radix) layout by default, ~60–80 bytes per key in the benchmark below
 - **Deterministic**: `auto_complete` returns keys in lexicographic (codepoint) order
 - **Unicode**: keys are UTF-8 strings, including emoji and combining characters
 - **Any value**: store any Erlang term
@@ -33,8 +33,10 @@ Memory per key (RSS delta for 200,000 keys, fresh VM per layout):
 
 | Keys | `:radix` | `:sorted` |
 |---|---|---|
-| `"word_<n>_suffix"` | 75 B | 764 B |
-| `"https://example.com/users/<n>/profile/settings"` | 165 B | 2,075 B |
+| `"word_<n>_suffix"` | 59–78 B | 764 B |
+| `"https://example.com/users/<n>/profile/settings"` | 131–165 B | 2,074 B |
+
+Ranges are the spread over repeated runs (small RSS deltas are noisy).
 
 Run it yourself:
 
@@ -111,18 +113,25 @@ sorted = TrieHard.new(layout: :sorted)
 | `count_prefix/2` | exact number of keys with the prefix |
 | `add_word_list/2` | `:ok` — inserts each word with itself as the value |
 
-Keys must be UTF-8 binaries: a non-binary key raises `FunctionClauseError`, invalid UTF-8 raises `ArgumentError`.
+Keys must be UTF-8 binaries. Single-key functions raise `FunctionClauseError` for a non-binary key;
+`insert_many/2` and `add_word_list/2` raise `ArgumentError` for any invalid element; invalid UTF-8
+always raises `ArgumentError`.
 
 ## Concurrency
 
 A trie can be shared between processes. Reads run concurrently; writes are exclusive. Every
 operation first runs on the calling scheduler without blocking; if the trie is locked by a writer,
-the key is longer than 4 KiB, the value larger than 64 KiB, or a traversal needs more than 10,000
-node visits, it is retried on a dirty CPU scheduler, so normal schedulers are never blocked.
+the key is longer than 4 KiB, the value larger than 64 KiB, or the operation would visit more than
+10,000 nodes or copy more than 64 KiB of key bytes (results, or a `:radix` edge split/merge), it is
+retried on a dirty CPU scheduler, so normal schedulers are never blocked.
 
 `add_word_list/2` and `insert_many/2` always run on a dirty scheduler and send their input in
 chunks of 1,000 entries, so readers interleave with large bulk loads. They are not atomic: an
-invalid element raises `ArgumentError` and the chunks before it remain inserted.
+invalid element raises `ArgumentError`; earlier chunks remain inserted, while entries in the
+invalid element's chunk (including those before it) are not inserted.
+
+While a long write holds the lock, readers wait on dirty schedulers. Bound key lengths for
+untrusted input: one huge key makes its write long.
 
 ## Memory
 
