@@ -1,7 +1,7 @@
 [package]
 name = "trie_hard_native"
 # Kept equal to the Elixir package version (scripts/set-version.sh writes both on release).
-version = "0.2.7"
+version = "0.3.0"
 authors = ["Niko"]
 edition = "2021"
 rust-version = "1.91"

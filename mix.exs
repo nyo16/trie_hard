@@ -1,7 +1,7 @@
 defmodule TrieHard.MixProject do
   use Mix.Project
 
-  @version "0.2.7"
+  @version "0.3.0"
   @source_url "https://github.com/nyo16/trie_hard"
 
   def project do
