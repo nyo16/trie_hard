@@ -27,8 +27,9 @@ defmodule TrieHard.Native do
     force_build: System.get_env("TRIE_HARD_BUILD") in ["1", "true"]
 
   # Placeholder functions that will be replaced by NIF implementations.
-  # Fast NIFs return :dirty when the lock is contended or the work exceeds the
-  # normal-scheduler budget; the caller retries with the *_dirty twin.
+  # Fast NIFs return :dirty when the work exceeds the normal-scheduler bounds
+  # (the caller runs the *_dirty twin) and :busy when the lock is taken (the
+  # caller yields and retries); see TrieHard.settle/5.
   def new_trie(_layout), do: :erlang.nif_error(:nif_not_loaded)
   def insert(_trie, _key, _etf), do: :erlang.nif_error(:nif_not_loaded)
   def insert_dirty(_trie, _key, _etf), do: :erlang.nif_error(:nif_not_loaded)

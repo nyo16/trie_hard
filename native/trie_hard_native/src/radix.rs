@@ -508,6 +508,23 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn deleting_a_node_with_one_child_charges_the_merge() {
+        let mut trie = RadixTrie::new();
+        let mut long_key = b"a".to_vec();
+        long_key.extend_from_slice(&[b'b'; 999]);
+        trie.put(b"a", 1);
+        trie.put(&long_key, 2);
+        assert_eq!(trie.labels(), [&b""[..], b"a", &long_key[1..]]);
+
+        // "a" keeps one child: deleting it merges "a" + 999 bytes.
+        assert_eq!(trie.delete(b"a", bytes(999)), Err(OverBudget));
+        assert_eq!(trie.get(b"a"), Some(&1));
+        assert_eq!(trie.delete(b"a", bytes(1000)), Ok(true));
+        assert_eq!(trie.labels(), [&b""[..], &long_key[..]]);
+        trie.check_invariants();
+    }
+
+    #[test]
     fn edges_split_and_merge_inside_multibyte_characters() {
         let mut trie = RadixTrie::new();
         trie.put("é".as_bytes(), 1); // C3 A9

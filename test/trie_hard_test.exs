@@ -28,6 +28,103 @@ defmodule TrieHardTest do
     end
   end
 
+  # C001: the fast path must hand off exactly at its documented bounds.
+  describe "fast-path budget boundaries" do
+    test ":sorted - 10,000 node visits stay fast, 10,001 go dirty" do
+      # A lone key of length L is L + 1 nodes (root + one per byte).
+      at_limit = TrieHard.new(layout: :sorted)
+      TrieHard.insert(at_limit, String.duplicate("a", 9_999), 1)
+      over = TrieHard.new(layout: :sorted)
+      TrieHard.insert(over, String.duplicate("a", 10_000), 1)
+
+      assert Native.count_prefix(at_limit, "") == 1
+      assert Native.count_prefix(over, "") == :dirty
+      assert [_] = Native.auto_complete(at_limit, "", 1)
+      assert Native.auto_complete(over, "", 1) == :dirty
+    end
+
+    test ":radix - 64 KiB of copied key bytes stay fast, one more byte goes dirty" do
+      # A lone key of length L is copied twice: into the buffer and into the result.
+      at_limit = TrieHard.new(layout: :radix)
+      TrieHard.insert(at_limit, String.duplicate("a", 32_768), 1)
+      over = TrieHard.new(layout: :radix)
+      TrieHard.insert(over, String.duplicate("a", 32_769), 1)
+
+      assert [_] = Native.auto_complete(at_limit, "", 1)
+      assert Native.auto_complete(over, "", 1) == :dirty
+      # A prefix inside the edge copies the rest of the edge plus the result:
+      # (32,769 - 1) + 32,769 = 65,537 bytes, one over the bound.
+      assert Native.auto_complete(over, "a", 1) == :dirty
+      assert [_] = Native.auto_complete(at_limit, "a", 1)
+      # Two node visits and no copies: counting is unaffected by edge length.
+      assert Native.count_prefix(over, "") == 1
+    end
+
+    test "an empty value binary is rejected by the NIF (it would read back as the key)" do
+      trie = TrieHard.new()
+      assert_raise ArgumentError, fn -> Native.insert(trie, "k", "") end
+      assert_raise ArgumentError, fn -> Native.insert_dirty(trie, "k", "") end
+      assert_raise ArgumentError, fn -> Native.insert_many(trie, [{"k", ""}]) end
+      assert TrieHard.fetch(trie, "k") == {:error, :not_found}
+    end
+  end
+
+  describe "lock contention" do
+    # Runs `hold` (one long NIF call holding the lock) in a task while `probe`
+    # spins on a fast NIF; true once the probe returned :busy.
+    defp busy_while_locked(hold, probe) do
+      holder = Task.async(hold)
+
+      seen =
+        Enum.reduce_while(Stream.repeatedly(fn -> nil end), false, fn _, _ ->
+          cond do
+            probe.() == :busy -> {:halt, true}
+            Process.alive?(holder.pid) -> {:cont, false}
+            true -> {:halt, false}
+          end
+        end)
+
+      Task.await(holder, 30_000)
+      seen
+    end
+
+    # 1,000 words of ~1 KB that share no prefix beyond their first bytes:
+    # about a million nodes, so one add_word_list call holds the write lock
+    # for many milliseconds.
+    defp long_words(tag), do: for(i <- 1..1_000, do: "#{tag}#{i}" <> String.duplicate("x", 1_000))
+
+    setup do
+      trie = TrieHard.new(layout: :sorted)
+      TrieHard.add_word_list(trie, for(i <- 1..200_000, do: "w#{i}"))
+      {:ok, trie: trie}
+    end
+
+    test "a fast write reports :busy while a reader holds the lock; insert still succeeds",
+         %{trie: trie} do
+      etf = :erlang.term_to_binary(:v)
+      count_all = fn -> Native.count_prefix_dirty(trie, "") end
+
+      assert busy_while_locked(count_all, fn -> Native.insert(trie, "probe", etf) end)
+
+      holder = Task.async(count_all)
+      assert TrieHard.insert(trie, "k", :v) == :ok
+      Task.await(holder, 30_000)
+      assert TrieHard.fetch(trie, "k") == {:ok, :v}
+    end
+
+    test "a fast read reports :busy while a writer holds the lock; fetch still succeeds",
+         %{trie: trie} do
+      assert busy_while_locked(
+               fn -> Native.add_word_list(trie, long_words("a")) end,
+               fn -> Native.get(trie, "w1") end
+             )
+
+      writer = Task.async(fn -> Native.add_word_list(trie, long_words("b")) end)
+      assert TrieHard.fetch(trie, "w1") == {:ok, "w1"}
+      Task.await(writer, 30_000)
+    end
+  end
+
   describe "layout cross-check" do
     test "both layouts return identical results for the same operation sequence" do
       :rand.seed(:exsss, {20, 26, 10})
@@ -373,6 +470,17 @@ defmodule TrieHardTest do
         TrieHard.insert(trie, "a", 1)
         assert TrieHard.auto_complete(trie, "", 2 ** 70) == ["a"]
       end
+
+      test "a chunk never grows past 1 MiB by adding an entry" do
+        trie = TrieHard.new(layout: @layout)
+        a = String.duplicate("a", 600_000)
+        b = String.duplicate("b", 600_000)
+
+        # a + b would exceed 1 MiB, so b starts the next chunk with the bad element.
+        assert_raise ArgumentError, fn -> TrieHard.add_word_list(trie, [a, b, :bad]) end
+        assert TrieHard.fetch(trie, a) == {:ok, a}
+        assert TrieHard.fetch(trie, b) == {:error, :not_found}
+      end
     end
 
     describe "#{layout}: regressions" do
@@ -665,7 +773,9 @@ defmodule TrieHardTest do
           assert reader_counts == Enum.sort(reader_counts), "counts went backwards"
         end
 
-        assert Enum.any?(counts, &(&1 < 200_000)), "no read overlapped the bulk load"
+        assert Enum.any?(counts, &(&1 > 0 and &1 < 200_000)),
+               "no read observed the trie part-way through the bulk load"
+
         assert TrieHard.count_prefix(trie, "w") == 200_000
         assert TrieHard.fetch(trie, "w200000") == {:ok, "w200000"}
       end

@@ -43,9 +43,10 @@ defmodule TrieHard do
     operation would visit more than 10,000 nodes or copy more than 64 KiB of
     keys (results, or an edge split/merged in the `:radix` layout), it is
     retried on a dirty CPU scheduler;
-  - when a writer holds the lock, the calling process yields and retries
-    (sleeping 1 ms between later attempts), so waiting does not occupy dirty
-    schedulers; after about 50 ms it waits on a dirty scheduler instead.
+  - when the lock is taken (by a writer, or by anyone for writes), the calling
+    process yields and retries the call, so waiting does not occupy dirty
+    schedulers. Reads keep retrying with 1 ms sleeps for about 50 ms; writes
+    stop after a few yields. Either then waits on a dirty scheduler.
 
   `add_word_list/2` and `insert_many/2` always run on a dirty scheduler, in
   chunks of at most 1,000 entries or 1 MiB of keys and values, so no bulk call
@@ -78,8 +79,9 @@ defmodule TrieHard do
   @chunk_size 1_000
   @chunk_bytes 1_048_576
 
-  # auto_complete limits decode as a u64 in the NIF.
-  @max_results_cap 0xFFFF_FFFF_FFFF_FFFF
+  # auto_complete limits decode as a `usize` in the NIF; no trie returns more
+  # than this many keys, and it fits a 32-bit `usize` too.
+  @max_results_cap 0xFFFF_FFFF
 
   @doc """
   Creates a new empty trie.
@@ -324,21 +326,19 @@ defmodule TrieHard do
     |> Enum.each(&Native.add_word_list(trie, &1))
   end
 
-  # Groups entries into chunks of at most @chunk_size entries or @chunk_bytes
-  # bytes (a single larger entry is its own chunk).
+  # Groups entries into chunks of at most @chunk_size entries and at most
+  # @chunk_bytes bytes; an entry larger than @chunk_bytes is its own chunk.
   defp chunk(entries, size_fun) do
     Stream.chunk_while(
       entries,
       {[], 0, 0},
       fn entry, {acc, count, bytes} ->
-        acc = [entry | acc]
-        count = count + 1
-        bytes = bytes + size_fun.(entry)
+        size = size_fun.(entry)
 
-        if count >= @chunk_size or bytes >= @chunk_bytes do
-          {:cont, Enum.reverse(acc), {[], 0, 0}}
+        if acc != [] and (count >= @chunk_size or bytes + size > @chunk_bytes) do
+          {:cont, Enum.reverse(acc), {[entry], 1, size}}
         else
-          {:cont, {acc, count, bytes}}
+          {:cont, {[entry | acc], count + 1, bytes + size}}
         end
       end,
       fn
@@ -372,12 +372,16 @@ defmodule TrieHard do
   #
   #   * `:dirty` - the work exceeds the fast-path bounds; run the twin on a
   #     dirty CPU scheduler.
-  #   * `:busy` - a writer holds the lock; yield, then retry the fast NIF, so
-  #     waiting readers don't occupy dirty schedulers (which the writer's own
-  #     bulk calls need). Only after ~50 ms of retries fall back to the
-  #     blocking twin.
+  #   * `:busy` - the lock is taken: by a writer for reads, by any holder for
+  #     writes. Yield, then retry the fast NIF, so waiting readers don't
+  #     occupy dirty schedulers (which the writer's own bulk calls need).
+  #     Reads then sleep 1 ms between retries for up to ~50 ms before falling
+  #     back to the blocking twin. Writes stop after the yields: readers hold
+  #     the lock only briefly, so the blocking twin acquires it almost at once,
+  #     while 1 ms sleeps would add latency to every write under read load.
   @busy_yields 16
   @busy_retries 64
+  @writes [:insert, :delete]
 
   # The fast NIF is called directly by each function; only the rare `:dirty` /
   # `:busy` outcomes go through a dynamic `apply/3`.
@@ -385,8 +389,14 @@ defmodule TrieHard do
 
   defp settle(:dirty, _fast, dirty, args, _attempt), do: apply(Native, dirty, args)
 
-  defp settle(:busy, fast, dirty, args, attempt) when attempt < @busy_retries do
-    if attempt < @busy_yields, do: :erlang.yield(), else: Process.sleep(1)
+  defp settle(:busy, fast, dirty, args, attempt) when attempt < @busy_yields do
+    :erlang.yield()
+    settle(apply(Native, fast, args), fast, dirty, args, attempt + 1)
+  end
+
+  defp settle(:busy, fast, dirty, args, attempt)
+       when attempt < @busy_retries and fast not in @writes do
+    Process.sleep(1)
     settle(apply(Native, fast, args), fast, dirty, args, attempt + 1)
   end
 

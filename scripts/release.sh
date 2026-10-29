@@ -98,6 +98,16 @@ check_tree_matches_tag() {
         print_error "HEAD is not the commit tagged $tag. Check out $tag first."
         exit 1
     fi
+    # The tag on origin is what CI built from; it must be the same commit.
+    local remote_commit
+    remote_commit=$(git ls-remote origin "refs/tags/$tag^{}" | cut -f1)
+    if [[ -z "$remote_commit" ]]; then
+        remote_commit=$(git ls-remote origin "refs/tags/$tag" | cut -f1)
+    fi
+    if [[ "$remote_commit" != "$(git rev-parse "$tag^{commit}")" ]]; then
+        print_error "Local tag $tag does not point at the same commit as on origin."
+        exit 1
+    fi
     if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
         print_error "Working tree is not clean (including untracked files):"
         git status --porcelain --untracked-files=all
@@ -191,7 +201,8 @@ generate_checksum() {
     fi
 
     print_info "Verifying build provenance attestations..."
-    local asset count=0
+    local asset count=0 tag_commit
+    tag_commit=$(git rev-parse "$tag^{commit}")
     for asset in "$assets_dir"/*.tar.gz; do
         [[ -e "$asset" ]] || continue
         count=$((count + 1))
@@ -199,6 +210,7 @@ generate_checksum() {
             --repo "$REPO" \
             --signer-workflow "$REPO/.github/workflows/release.yml" \
             --source-ref "refs/tags/$tag" \
+            --source-digest "$tag_commit" \
             --deny-self-hosted-runners; then
             print_error "Attestation verification failed for $(basename "$asset"). Aborting."
             exit 1
@@ -211,7 +223,10 @@ generate_checksum() {
     print_success "$count release assets have valid attestations from the $tag release workflow."
 
     print_info "Generating checksum file for precompiled NIFs..."
-    if ! mix rustler_precompiled.download TrieHard.Native --all --print; then
+    # The task compiles the app first. With precompiled downloads enabled that
+    # compile would look the host NIF up in the old checksum file and raise, so
+    # build the NIF from source for this step.
+    if ! TRIE_HARD_BUILD=1 mix rustler_precompiled.download TrieHard.Native --all --print; then
         print_error "Failed to download precompiled NIFs or generate checksum."
         print_info "Make sure all GitHub Actions builds completed successfully."
         exit 1
