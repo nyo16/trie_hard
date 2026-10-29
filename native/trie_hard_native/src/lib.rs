@@ -109,6 +109,16 @@ fn key_bytes<'k>(key: &'k Binary, mode: Mode) -> NifResult<Option<&'k [u8]>> {
     Ok(Some(key.as_slice()))
 }
 
+/// External term format is never empty; an empty binary (only reachable by
+/// calling `TrieHard.Native` directly) would read back as the self-key
+/// marker, so it is rejected.
+fn etf_value(etf: &Binary) -> NifResult<Value> {
+    if etf.is_empty() {
+        return Err(Error::BadArg);
+    }
+    Ok(Value::etf(etf.as_slice()))
+}
+
 /// Completions are valid UTF-8 by construction (prefixes of UTF-8 keys
 /// extended to full keys), so they are emitted as binaries without re-checking.
 fn encode_words<'a>(env: Env<'a>, words: &[Vec<u8>]) -> Term<'a> {
@@ -138,6 +148,7 @@ fn new_trie(layout: Atom) -> NifResult<ResourceArc<TrieResource>> {
     }))
 }
 
+/// Returns `:ok`, `:dirty`, or `:busy`.
 fn insert_impl<'a>(
     env: Env<'a>,
     trie: &TrieResource,
@@ -151,7 +162,7 @@ fn insert_impl<'a>(
     if mode.too_large(etf.len(), FAST_MAX_VALUE_BYTES) {
         return Ok(dirty(env));
     }
-    let value = Value::etf(etf.as_slice());
+    let value = etf_value(&etf)?;
     let Some(mut guard) = trie.write(mode) else {
         return Ok(busy(env));
     };
@@ -181,18 +192,24 @@ fn insert_dirty<'a>(
     insert_impl(env, &trie, key, etf, Mode::Blocking)
 }
 
-/// Returns `{:ok, etf}`, `:self_key`, `:not_found`, or `:dirty`.
+/// Returns `{:ok, etf}`, `:self_key`, `:not_found`, `:dirty`, or `:busy`.
 fn get_impl<'a>(env: Env<'a>, trie: &TrieResource, key: Binary, mode: Mode) -> NifResult<Term<'a>> {
     let Some(key) = key_bytes(&key, mode)? else {
         return Ok(dirty(env));
     };
-    // Clone the Arc under the read lock; copy the bytes after releasing it.
-    let value = match trie.read(mode) {
-        Some(guard) => guard.get(key).cloned(),
+    // Under the read lock, clone the Arc only when there are bytes to copy
+    // (self-key values share one Arc; cloning it would make every such hit
+    // touch a VM-wide refcount). Copy the bytes after releasing the lock.
+    let found = match trie.read(mode) {
+        Some(guard) => guard
+            .get(key)
+            .map(|value| value.etf_bytes().map(|_| value.clone())),
         None => return Ok(busy(env)),
     };
-    let Some(value) = value else {
-        return Ok(atoms::not_found().encode(env));
+    let value = match found {
+        None => return Ok(atoms::not_found().encode(env)),
+        Some(None) => return Ok(atoms::self_key().encode(env)),
+        Some(Some(value)) => value,
     };
     Ok(match value.etf_bytes() {
         None => atoms::self_key().encode(env),
@@ -219,7 +236,7 @@ fn get_dirty<'a>(
     get_impl(env, &trie, key, Mode::Blocking)
 }
 
-/// Returns whether the key existed, or `:dirty`.
+/// Returns whether the key existed, `:dirty`, or `:busy`.
 fn delete_impl<'a>(
     env: Env<'a>,
     trie: &TrieResource,
@@ -365,16 +382,16 @@ fn count_prefix_dirty<'a>(
 /// Always dirty: the Elixir side encodes values and chunks the pairs to bound
 /// the write-lock hold. Values are copied before the lock is taken.
 #[rustler::nif(schedule = "DirtyCpu")]
-fn insert_many(trie: ResourceArc<TrieResource>, pairs: Vec<(&str, Binary)>) -> Atom {
-    let entries: Vec<(&str, Value)> = pairs
+fn insert_many(trie: ResourceArc<TrieResource>, pairs: Vec<(&str, Binary)>) -> NifResult<Atom> {
+    let entries = pairs
         .into_iter()
-        .map(|(key, etf)| (key, Value::etf(etf.as_slice())))
-        .collect();
+        .map(|(key, etf)| Ok((key, etf_value(&etf)?)))
+        .collect::<NifResult<Vec<(&str, Value)>>>()?;
     let mut guard = trie.trie.write().unwrap_or_else(PoisonError::into_inner);
     for (key, value) in entries {
         insert_unlimited(&mut guard, key, value);
     }
-    atoms::ok()
+    Ok(atoms::ok())
 }
 
 /// Always dirty: the Elixir side chunks the list to bound the write-lock hold.
@@ -443,5 +460,14 @@ mod tests {
         assert!(Mode::Fast.too_large(FAST_MAX_KEY_BYTES + 1, FAST_MAX_KEY_BYTES));
         assert!(!Mode::Blocking.too_large(usize::MAX, FAST_MAX_KEY_BYTES));
         assert_eq!(Mode::Blocking.budget(), Budget::UNLIMITED);
+    }
+
+    /// The documented fast-path bounds; the NIF-level boundary tests in
+    /// test/trie_hard_test.exs exercise them end to end.
+    #[test]
+    fn fast_mode_bounds_are_the_documented_values() {
+        assert_eq!(FAST_MAX_KEY_BYTES, 4096);
+        assert_eq!(FAST_MAX_VALUE_BYTES, 65_536);
+        assert_eq!(Mode::Fast.budget(), Budget::new(10_000, 65_536));
     }
 }

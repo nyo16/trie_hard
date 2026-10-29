@@ -129,9 +129,10 @@ operation first runs on the calling scheduler without blocking:
 - if the key is longer than 4 KiB, the value larger than 64 KiB, or the operation would visit more
   than 10,000 nodes or copy more than 64 KiB of key bytes (results, or a `:radix` edge split/merge),
   it is retried on a dirty CPU scheduler;
-- if a writer holds the lock, the calling process yields and retries (sleeping 1 ms between later
-  attempts), so waiting readers don't occupy the dirty schedulers the writer needs; after about
-  50 ms it waits on a dirty scheduler instead.
+- if the lock is taken (by a writer, or by anyone for writes), the calling process yields and
+  retries, so waiting doesn't occupy the dirty schedulers a bulk writer needs. Reads keep retrying
+  with 1 ms sleeps for about 50 ms; writes stop after a few yields. Either then waits on a dirty
+  scheduler.
 
 Normal schedulers are never blocked.
 

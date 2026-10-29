@@ -1,32 +1,30 @@
 defmodule TrieHard.SchedulerTest do
   # The system monitor is VM-global, so this module must not run concurrently
-  # with itself; other modules' processes are filtered out below.
+  # with itself; other processes are filtered out below.
   use ExUnit.Case, async: false
 
-  # An integration check for gross stalls (before fast/dirty NIF pairs, a
-  # similar load stalled normal schedulers for up to 564 ms). The exact
-  # fast-path bounds are pinned by the `:dirty` contract tests in
-  # trie_hard_test.exs. 100 ms stays clear of GC pauses in test processes.
-  @threshold_ms 100
+  # Only the reader processes are monitored: their trie calls are the ones
+  # that run on normal schedulers. Each fast call is bounded far below this
+  # (≲1 ms in a debug build); an unbounded one on this trie takes tens of ms
+  # (a whole-trie count in :sorted ≈ 35 ms). Long-schedule reports are not
+  # produced for dirty schedulers.
+  @threshold_ms 20
 
   for layout <- [:sorted, :radix] do
-    test "#{layout}: no trie call blocks a normal scheduler during a contended bulk load" do
+    test "#{layout}: no trie call blocks a normal scheduler, during or after a bulk load" do
       trie = TrieHard.new(layout: unquote(layout))
-      long = String.duplicate("x", 300_000)
-      words = for i <- 1..200_000, do: "w#{i}"
+      parent = self()
 
-      previous = :erlang.system_monitor(self(), [{:long_schedule, @threshold_ms}])
-      on_exit(fn -> restore(previous) end)
-
-      writer = Task.async(fn -> TrieHard.add_word_list(trie, [long | words]) end)
+      writer =
+        Task.async(fn ->
+          words = for i <- 1..200_000, do: "w#{i}"
+          TrieHard.add_word_list(trie, [String.duplicate("x", 300_000) | words])
+        end)
 
       readers =
         for i <- 1..20 do
           Task.async(fn ->
-            # One whole-trie traversal and one long-key copy per reader: both
-            # must leave the normal scheduler; the rest are cheap fast calls.
-            TrieHard.count_prefix(trie, "")
-            TrieHard.auto_complete(trie, "x", 1)
+            receive do: (:monitoring -> :ok)
 
             for _ <- 1..100 do
               TrieHard.fetch(trie, "w#{i}")
@@ -34,18 +32,33 @@ defmodule TrieHard.SchedulerTest do
               TrieHard.count_prefix(trie, "w#{i}0")
               TrieHard.insert(trie, "r#{i}", i)
             end
+
+            send(parent, {:loop_done, self()})
+            receive do: (:loaded -> :ok)
+
+            # On the full trie: a whole-trie traversal and a 300 KB key copy.
+            TrieHard.count_prefix(trie, "")
+            TrieHard.auto_complete(trie, "x", 1)
           end)
         end
 
-      Task.await_many([writer | readers], 60_000)
+      previous = :erlang.system_monitor(self(), [{:long_schedule, @threshold_ms}])
+      on_exit(fn -> restore(previous) end)
+      Enum.each(readers, &send(&1.pid, :monitoring))
+
+      for %{pid: pid} <- readers, do: assert_receive({:loop_done, ^pid}, 60_000)
+      Task.await(writer, 60_000)
+      Enum.each(readers, &send(&1.pid, :loaded))
+      Task.await_many(readers, 60_000)
+
       assert TrieHard.count_prefix(trie, "w") == 200_000
       assert TrieHard.count_prefix(trie, "") == 200_021
 
-      ours = MapSet.new([self(), writer.pid | Enum.map(readers, & &1.pid)])
+      monitored = MapSet.new(readers, & &1.pid)
 
       stalls =
         collect_stalls()
-        |> Enum.filter(fn {pid, _info} -> MapSet.member?(ours, pid) end)
+        |> Enum.filter(fn {pid, _info} -> MapSet.member?(monitored, pid) end)
 
       assert stalls == []
     end

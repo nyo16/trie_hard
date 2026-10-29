@@ -82,8 +82,9 @@ found? = TrieHard.prefix?(trie, prefix)
 - Concurrency: reads run concurrently (`RwLock` instead of `Mutex`). Each call runs on the
   caller's scheduler without blocking. Calls whose key exceeds 4 KiB, value exceeds 64 KiB, or
   that would visit more than 10,000 nodes or copy more than 64 KiB move to a dirty CPU scheduler.
-  Calls that find the lock held by a writer yield and retry (about 50 ms) before waiting on a
-  dirty scheduler, so waiting readers don't starve bulk writers of dirty schedulers.
+  Calls that find the lock taken yield and retry before waiting on a dirty scheduler (reads for
+  about 50 ms, writes only briefly), so waiting readers don't starve bulk writers of dirty
+  schedulers.
 - `add_word_list/2` runs on a dirty scheduler in chunks of at most 1,000 words or 1 MiB, so
   readers interleave with bulk loads, and accepts any enumerable. It is not atomic: an invalid
   element raises `ArgumentError`; earlier chunks stay inserted, words in its chunk are not.
